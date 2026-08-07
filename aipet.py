@@ -102,7 +102,7 @@ def load_config():
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
             return json.load(f)
-    return {"desktop_aipet": {}, "monitors": []}
+    return {"desktop_aipet": {}, "menus": []}
 
 
 def save_config(cfg):
@@ -697,11 +697,12 @@ class ConfigViewer(tk.Toplevel):
     """文件查看窗口：默认只读，可一键切换为编辑态并保存。"""
 
     def __init__(self, master, title, filepath, pretty_json=True,
-                 editable=False):
+                 editable=False, on_save=None):
         super().__init__(master)
         self.filepath = filepath
         self.pretty = pretty_json
         self._editing = False
+        self.on_save = on_save
         self.title(f"{title} — {filepath}")
         self.geometry("900x640")
         self.configure(bg=VIEW_BG)
@@ -792,6 +793,8 @@ class ConfigViewer(tk.Toplevel):
             self._build_toolbar()
             self.status.config(text="已保存 ✓")
             log.info("保存配置: %s", self.filepath)
+            if callable(self.on_save):
+                self.after(200, self.on_save)
         except Exception as e:
             log.exception("保存配置失败")
             self.status.config(text=f"保存失败: {e}")
@@ -967,7 +970,7 @@ class DesktopAIPet:
     def __init__(self):
         self.cfg = load_config()
         self.ap = self.cfg.get("desktop_aipet", {})
-        self.monitors = self.cfg.get("monitors", [])
+        self.menus = self.cfg.get("menus", [])
         # 桌宠昵称：配置 desktop_aipet.nickname，托盘/气泡显示「桌面AI助理-昵称」
         self.nickname = (self.ap.get("nickname") or "").strip()
         # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」
@@ -984,10 +987,10 @@ class DesktopAIPet:
         self.scale = self.ap.get("pet_scale", 1.0)
         self.check_interval = int(self.ap.get("check_interval_s", 30))
 
-        # 久坐提醒配置：启用开关、时段(起~止小时)、间隔(分钟)、跳过小时、提醒文案。
-        # 默认 7:00~22:00 每 60 分钟提醒一次，9:00 整段跳过（见 config.json 的 health_reminder）。
-        hr = self.cfg.get("health_reminder")
-        self.health_reminder = hr if isinstance(hr, dict) else {}
+        # 久坐提醒配置：来自 monitors 中 type=health_reminder 的条目（无 endpoint，
+        # 不显示健康圆圈）。默认 7:00~22:00 每 60 分钟提醒一次，9:00 整段跳过。
+        self.health_reminder = next(
+            (m for m in self.menus if m.get("type") == "health_reminder"), {})
         _r_start = int(self.health_reminder.get("start_hour", 7))
         _r_end = int(self.health_reminder.get("end_hour", 22))
         # 间隔优先用 interval_minutes（分钟），兼容旧字段 interval_hour（小时）
@@ -1306,7 +1309,7 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def _find_action_by_type(self, atype):
-        for m in self.monitors:
+        for m in self.menus:
             for a in m.get("actions", []):
                 if self._action_type(a) == atype:
                     return a
@@ -1490,7 +1493,9 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def _overall_summary(self):
-        enabled = [m for m in self.monitors if m.get("enabled", True)]
+        # 仅统计带 endpoint 的监控项；无 endpoint 的纯菜单组（如久坐提醒）不参与健康聚合
+        enabled = [m for m in self.menus
+                   if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
             return "无启用的监控项"
         bad = [m["name"] for m in enabled
@@ -1519,11 +1524,18 @@ class DesktopAIPet:
             pystray.Menu.SEPARATOR,
         ]
 
-        for m in self.monitors:
-            name = m["name"]
+        for m in self.menus:
+            name = m.get("name", "")
             actions = m.get("actions", [])
-            st = self._monitor_status(name)[0]
-            status = STATUS_EMOJI[st]
+            has_endpoint = bool(m.get("endpoint"))
+
+            if has_endpoint:
+                st = self._monitor_status(name)[0]
+                status = STATUS_EMOJI[st]
+                label_prefix = "{} ".format(status)
+            else:
+                # 无 endpoint 的纯菜单组（如久坐提醒）：不显示健康圆圈
+                label_prefix = ""
 
             if not m.get("enabled", True):
                 # 未启用：不显示状态圆圈，仅灰显名称
@@ -1533,40 +1545,33 @@ class DesktopAIPet:
 
             if not actions:
                 # 仅有健康监控、无快捷动作：直接展示状态圆圈+名称
-                items.append(pystray.MenuItem(
-                    "{} {}".format(status, name), None, enabled=False))
+                if label_prefix:
+                    items.append(pystray.MenuItem(
+                        "{}{}".format(label_prefix, name), None, enabled=False))
+                else:
+                    items.append(pystray.MenuItem(name, None, enabled=False))
                 continue
 
             # 有动作：级联子菜单；级联标签用「圆圈 名称」统一左对齐
             sub_items = []
+            is_reminder = (m.get("type") == "health_reminder")
+            rm_on = m.get("enabled", True)
             for act in actions:
-                sub_items.append(pystray.MenuItem(
-                    "{} {}".format(act.get("icon", "▶"),
-                                   act.get("label", "")),
-                    self.make_handler(act, m)))
-            items.append(pystray.MenuItem(
-                "{} {}".format(status, name),
-                pystray.Menu(*sub_items)))
-
-        # 久坐提醒：菜单结构（父标签 + 子项）完全由 config.json 的
-        # health_reminder.menu 驱动；开启/关闭项根据当前 enabled 状态加勾选前缀。
-        reminder_menu = self.health_reminder.get("menu")
-        if reminder_menu:
-            rm_on = self.health_reminder.get("enabled", True)
-            sub_items = []
-            for act in reminder_menu.get("actions", []):
                 atype = self._action_type(act)
                 label = act.get("label", "")
-                if atype == "reminder_enable":
-                    label = ("✅ " if rm_on else "") + label
-                elif atype == "reminder_disable":
-                    label = ("⏸ " if not rm_on else "") + label
+                if is_reminder:
+                    # 久坐提醒：开启/关闭项按当前 enabled 加勾选前缀
+                    if atype == "reminder_enable":
+                        label = ("✅ " if rm_on else "") + label
+                    elif atype == "reminder_disable":
+                        label = ("⏸ " if not rm_on else "") + label
+                    else:
+                        label = "{} {}".format(act.get("icon", "▶"), label)
                 else:
                     label = "{} {}".format(act.get("icon", "▶"), label)
-                sub_items.append(pystray.MenuItem(
-                    label, self.make_handler(act, None)))
+                sub_items.append(pystray.MenuItem(label, self.make_handler(act, m)))
             items.append(pystray.MenuItem(
-                reminder_menu.get("label", "🪑 久坐提醒"),
+                "{}{}".format(label_prefix, name),
                 pystray.Menu(*sub_items)))
 
         # 将开机自启的勾选状态写入标签，避免 Windows 菜单 gutter 导致左侧空白参差
@@ -1581,13 +1586,16 @@ class DesktopAIPet:
                              lambda *a: self.post_ui(self.force_check)),
             pystray.MenuItem(startup_label,
                              lambda *a: self.post_ui(self._toggle_startup)),
-            pystray.MenuItem("📝 助理配置",
+            pystray.MenuItem("🛠️ 助理配置",
                              lambda *a: self.post_ui(
                                  lambda: self._singleton_window(
                                      "cfg:self",
                                      lambda: ConfigViewer(
                                          self.root, "助理配置",
-                                         str(CONFIG_PATH), editable=False)))),
+                                         str(CONFIG_PATH), editable=False,
+                                         on_save=self._reload_config)))),
+            pystray.MenuItem("🔄 重载配置",
+                             lambda *a: self.post_ui(self._reload_config)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🔁 重启", lambda *a: self.post_ui(self.restart_app)),
             pystray.MenuItem("❌ 退出", lambda *a: self.post_ui(self._on_exit)),
@@ -1676,7 +1684,9 @@ class DesktopAIPet:
     def run_health_check(self):
         if not self._running:
             return
-        enabled = [m for m in self.monitors if m.get("enabled", True)]
+        # 仅探测带 endpoint 的监控项；无 endpoint 的纯菜单组（如久坐提醒）不参与探活
+        enabled = [m for m in self.menus
+                   if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
             self._schedule_next_check()
             return
@@ -1812,6 +1822,50 @@ class DesktopAIPet:
     # Config persistence
     # ------------------------------------------------------------------
 
+    def _reload_config(self):
+        """从磁盘重新读取 config.json，刷新全部运行状态（菜单/昵称/宠物参数等）。"""
+        try:
+            new_cfg = load_config()
+        except Exception:
+            log.exception("重载配置失败：无法读取 config.json")
+            self.notify("❌ 重载配置失败", "无法读取配置文件", "error")
+            return
+
+        self.cfg = new_cfg
+        self.ap = self.cfg.get("desktop_aipet", {})
+        self.menus = self.cfg.get("menus", [])
+
+        # 更新昵称 / 称呼 / 台词
+        self.nickname = (self.ap.get("nickname") or "").strip()
+        self.boss = (self.ap.get("boss") or "老板").strip() or "老板"
+        raw = self.cfg.get("greetings")
+        loaded = [str(g).strip() for g in raw
+                  if isinstance(g, str) and str(g).strip()] \
+            if isinstance(raw, list) else []
+        self.greetings = loaded or list(_DEFAULT_GREETINGS)
+
+        # 更新宠物参数
+        self.pet_visible = self.ap.get("pet_visible", True)
+        self.scale = self.ap.get("pet_scale", 1.0)
+        self.check_interval = int(self.ap.get("check_interval_s", 30))
+
+        # 久坐提醒：重新从 menus 中定位
+        self.health_reminder = next(
+            (m for m in self.menus if m.get("type") == "health_reminder"), {})
+
+        # 重置监控状态，下一轮健康探活将使用最新配置
+        self.monitor_states.clear()
+
+        # 重建托盘菜单
+        self._refresh_menu()
+        if self.tray:
+            self.tray.title = self.assistant_display_name()
+
+        self.notify("✅ 配置已重载",
+                    f"menus: {len(self.menus)} 项 · 间隔: {self.check_interval}s", "ok")
+        log.info("配置已重载 | menus=%d | interval=%ds",
+                 len(self.menus), self.check_interval)
+
     def _save_config(self):
         try:
             if self.root and self.root.state() == "normal":
@@ -1846,7 +1900,6 @@ class DesktopAIPet:
                     self.root.after_cancel(aid)
                 except Exception:
                     pass
-        self._save_config()
         if self.tray:
             try:
                 self.tray.stop()
@@ -1886,7 +1939,7 @@ class DesktopAIPet:
     def run(self):
         self.setup()
         log.info("桌面AI助理 启动 | 大小: %dpx | 间隔: %ds | 监控: %d 项",
-                 int(72 * self.scale), self.check_interval, len(self.monitors))
+                 int(72 * self.scale), self.check_interval, len(self.menus))
 
         self.create_pet_window()
         if not self.pet_visible:

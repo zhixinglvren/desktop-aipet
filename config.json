@@ -11,7 +11,7 @@
     "nickname": "小新",
     "boss": "老板"
   },
-  "monitors": [
+  "menus": [
     {
       "name": "Nanobot",
       "endpoint": "http://127.0.0.1:18790/health",
@@ -79,6 +79,35 @@
           "icon": "📄",
           "type": "popup_log",
           "title": "Nanobot Gateway 实时日志"
+        }
+      ]
+    },
+    {
+      "name": "久坐提醒",
+      "type": "health_reminder",
+      "enabled": true,
+      "start_hour": 7,
+      "end_hour": 22,
+      "interval_minutes": 60,
+      "skip_hours": [
+        9
+      ],
+      "message": "该起身活动一下身体啦～伸个懒腰、走两步，别久坐伤身哦！",
+      "actions": [
+        {
+          "type": "reminder_enable",
+          "icon": "✅",
+          "label": "开启提醒"
+        },
+        {
+          "type": "reminder_disable",
+          "icon": "⏸",
+          "label": "关闭提醒"
+        },
+        {
+          "type": "reminder_test",
+          "icon": "🔔",
+          "label": "测试提醒"
         }
       ]
     }
@@ -199,35 +228,5 @@
     "今天的你依然在发光。",
     "有我在，琐事不烦心。",
     "我在这儿陪你度过每一天。"
-  ],
-  "health_reminder": {
-    "enabled": true,
-    "start_hour": 7,
-    "end_hour": 22,
-    "interval_minutes": 60,
-    "skip_hours": [
-      9
-    ],
-    "message": "该起身活动一下身体啦～伸个懒腰、走两步，别久坐伤身哦！",
-    "menu": {
-      "label": "🪑 久坐提醒",
-      "actions": [
-        {
-          "type": "reminder_enable",
-          "icon": "✅",
-          "label": "开启提醒"
-        },
-        {
-          "type": "reminder_disable",
-          "icon": "⏸",
-          "label": "关闭提醒"
-        },
-        {
-          "type": "reminder_test",
-          "icon": "🔔",
-          "label": "测试提醒"
-        }
-      ]
-    }
-  }
+  ]
 }
