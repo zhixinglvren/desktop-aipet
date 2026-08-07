@@ -984,6 +984,31 @@ class DesktopAIPet:
         self.scale = self.ap.get("pet_scale", 1.0)
         self.check_interval = int(self.ap.get("check_interval_s", 30))
 
+        # 久坐提醒配置：启用开关、时段(起~止小时)、间隔(分钟)、跳过小时、提醒文案。
+        # 默认 7:00~22:00 每 60 分钟提醒一次，9:00 整段跳过（见 config.json 的 health_reminder）。
+        hr = self.cfg.get("health_reminder")
+        self.health_reminder = hr if isinstance(hr, dict) else {}
+        _r_start = int(self.health_reminder.get("start_hour", 7))
+        _r_end = int(self.health_reminder.get("end_hour", 22))
+        # 间隔优先用 interval_minutes（分钟），兼容旧字段 interval_hour（小时）
+        _iv_min = self.health_reminder.get("interval_minutes")
+        if _iv_min is None:
+            _iv_min = int(self.health_reminder.get("interval_hour", 1)) * 60
+        _r_iv = max(1, int(_iv_min))
+        _r_skip = set(int(h) for h in self.health_reminder.get("skip_hours", [9])
+                      if isinstance(h, (int, float)))
+        # 预计算所有触发时刻（当天分钟数）：从 start_hour:00 起按间隔取点，
+        # 落在 [start,end] 且不在跳过小时内的时刻。间隔不再锚定整点。
+        self._reminder_slots = set()
+        _m = _r_start * 60
+        _end_min = _r_end * 60
+        while _m <= _end_min:
+            if (_m // 60) not in _r_skip:
+                self._reminder_slots.add(_m)
+            _m += _r_iv
+        self._reminder_last_key = None
+        self._reminder_poll_ms = 20000
+
         self.pet_frames = {}
         self.pet_tk_frames = {}
         self.current_state = "normal"
@@ -1523,6 +1548,27 @@ class DesktopAIPet:
                 "{} {}".format(status, name),
                 pystray.Menu(*sub_items)))
 
+        # 久坐提醒：菜单结构（父标签 + 子项）完全由 config.json 的
+        # health_reminder.menu 驱动；开启/关闭项根据当前 enabled 状态加勾选前缀。
+        reminder_menu = self.health_reminder.get("menu")
+        if reminder_menu:
+            rm_on = self.health_reminder.get("enabled", True)
+            sub_items = []
+            for act in reminder_menu.get("actions", []):
+                atype = self._action_type(act)
+                label = act.get("label", "")
+                if atype == "reminder_enable":
+                    label = ("✅ " if rm_on else "") + label
+                elif atype == "reminder_disable":
+                    label = ("⏸ " if not rm_on else "") + label
+                else:
+                    label = "{} {}".format(act.get("icon", "▶"), label)
+                sub_items.append(pystray.MenuItem(
+                    label, self.make_handler(act, None)))
+            items.append(pystray.MenuItem(
+                reminder_menu.get("label", "🪑 久坐提醒"),
+                pystray.Menu(*sub_items)))
+
         # 将开机自启的勾选状态写入标签，避免 Windows 菜单 gutter 导致左侧空白参差
         startup_on = self._is_startup_enabled()
         startup_label = "⚙️ 开机自启 [{}]".format("✓" if startup_on else " ")
@@ -1683,6 +1729,86 @@ class DesktopAIPet:
                 self.check_interval * 1000, self.run_health_check)
 
     # ------------------------------------------------------------------
+    # 久坐提醒（Stand-up reminder）
+    # ------------------------------------------------------------------
+
+    def start_health_reminder(self):
+        """启动久坐提醒轮询（主线程 root.after 递归调度）。"""
+        if self._running and self.root:
+            self.root.after(self._reminder_poll_ms, self._health_reminder_tick)
+
+    def _health_reminder_tick(self):
+        if not (self._running and self.root):
+            return
+        try:
+            self._maybe_remind()
+        except Exception:
+            log.exception("久坐提醒检查失败")
+        # 无论是否触发，都继续下一轮轮询
+        self.root.after(self._reminder_poll_ms, self._health_reminder_tick)
+
+    def _maybe_remind(self):
+        cfg = self.health_reminder
+        if not cfg.get("enabled", True):
+            return
+        now = time.localtime()
+        # 仅当「当前时刻(当天分钟数)」落在预计算的提醒时刻集合内才触发
+        now_min = now.tm_hour * 60 + now.tm_min
+        if now_min not in self._reminder_slots:
+            return
+        # 同一时刻只提醒一次，避免轮询重复弹出
+        key = (now.tm_year, now.tm_mon, now.tm_mday, now_min)
+        if key == self._reminder_last_key:
+            return
+        self._reminder_last_key = key
+        msg = (cfg.get("message") or "").strip()
+        if not msg:
+            return
+        title = self.assistant_display_name()
+        if self.bubble:
+            self.bubble.show(title, msg, "warn", duration=8000)
+        log.info("久坐提醒触发 | %02d:%02d | %s", now.tm_hour, now.tm_min, msg)
+
+    def set_reminder_enabled(self, on):
+        """开启/关闭久坐提醒，持久化到 config.json 并刷新托盘菜单状态。"""
+        try:
+            self.health_reminder["enabled"] = bool(on)
+        except Exception:
+            self.health_reminder = {"enabled": bool(on)}
+        self._save_config()
+        self._refresh_menu()
+        self.notify("🪑 久坐提醒",
+                    "已开启，将按配置时段提醒你起身活动。" if on
+                    else "已关闭久坐提醒。",
+                    "info")
+        log.info("久坐提醒已%s", "开启" if on else "关闭")
+
+    def test_reminder(self):
+        """立即弹出一次久坐提醒（忽略时段与时间），用于验证提醒效果。"""
+        cfg = self.health_reminder
+        msg = (cfg.get("message") or "").strip()
+        if not msg:
+            msg = "该起身活动一下身体啦～"
+        title = self.assistant_display_name()
+        if self.bubble:
+            self.bubble.show(title, msg, "warn", duration=8000)
+        log.info("久坐提醒（测试）触发 | %s", msg)
+
+    # -- 久坐提醒菜单动作（由 config.json 的 health_reminder.menu 驱动）--
+
+    def _do_reminder_enable(self, action, monitor):
+        """开启久坐提醒（菜单动作 type=reminder_enable）。"""
+        self.set_reminder_enabled(True)
+
+    def _do_reminder_disable(self, action, monitor):
+        """关闭久坐提醒（菜单动作 type=reminder_disable）。"""
+        self.set_reminder_enabled(False)
+
+    def _do_reminder_test(self, action, monitor):
+        """立即测试弹出久坐提醒（菜单动作 type=reminder_test）。"""
+        self.test_reminder()
+
+    # ------------------------------------------------------------------
     # Config persistence
     # ------------------------------------------------------------------
 
@@ -1772,6 +1898,7 @@ class DesktopAIPet:
 
         self._pump_ui()
         self.run_health_check()
+        self.start_health_reminder()
         self.start_animation()
 
         threading.Thread(target=self.tray.run, daemon=True,
