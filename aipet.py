@@ -697,11 +697,12 @@ class ConfigViewer(tk.Toplevel):
     """文件查看窗口：默认只读，可一键切换为编辑态并保存。"""
 
     def __init__(self, master, title, filepath, pretty_json=True,
-                 editable=False):
+                 editable=False, on_save=None):
         super().__init__(master)
         self.filepath = filepath
         self.pretty = pretty_json
         self._editing = False
+        self.on_save = on_save
         self.title(f"{title} — {filepath}")
         self.geometry("900x640")
         self.configure(bg=VIEW_BG)
@@ -792,6 +793,8 @@ class ConfigViewer(tk.Toplevel):
             self._build_toolbar()
             self.status.config(text="已保存 ✓")
             log.info("保存配置: %s", self.filepath)
+            if callable(self.on_save):
+                self.after(200, self.on_save)  # 延迟确保文件落盘
         except Exception as e:
             log.exception("保存配置失败")
             self.status.config(text=f"保存失败: {e}")
@@ -967,9 +970,7 @@ class DesktopAIPet:
     def __init__(self):
         self.cfg = load_config()
         self.ap = self.cfg.get("desktop_aipet", {})
-        self.monitors = self.cfg.get("monitors", [])
-        # AI 助理适配（Claude Code / Codex / OpenCode），来自配置 ai_assistants
-        self.ai_assistants = self.cfg.get("ai_assistants", [])
+        self.menus = self.cfg.get("menus", [])
         # 桌宠昵称：配置 desktop_aipet.nickname，托盘/气泡显示「桌面AI助理-昵称」
         self.nickname = (self.ap.get("nickname") or "").strip()
         # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」
@@ -1283,7 +1284,7 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def _find_action_by_type(self, atype):
-        for m in self.monitors:
+        for m in self.menus:
             for a in m.get("actions", []):
                 if self._action_type(a) == atype:
                     return a
@@ -1467,7 +1468,9 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def _overall_summary(self):
-        enabled = [m for m in self.monitors if m.get("enabled", True)]
+        # 仅统计带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与健康聚合
+        enabled = [m for m in self.menus
+                   if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
             return "无启用的监控项"
         bad = [m["name"] for m in enabled
@@ -1485,68 +1488,6 @@ class DesktopAIPet:
         base = "桌面AI助理"
         return f"{base}-{self.nickname}" if self.nickname else base
 
-    # -- AI 助理适配（Claude Code / Codex / OpenCode） --------------------
-
-    def launch_ai_assistant(self, ast):
-        """以 powershell 启动某 AI 助理；命令与默认参数均可配置。"""
-        cmd = (ast.get("launch") or "").strip()
-        if not cmd:
-            self.notify("⚠️ 未配置启动命令", ast.get("name", ""), "warn")
-            return
-        args = (ast.get("launch_args") or "").strip()
-        full = f"{cmd} {args}".strip() if args else cmd
-        try:
-            # 以 powershell 新开可见窗口启动，便于交互
-            launch(["powershell.exe", "-NoLogo", "-NoExit", "-Command", full],
-                   visible=True)
-            self.notify(f"🚀 启动 {ast.get('name', '')}", full, "ok")
-            log.info("启动 AI 助理: %s | %s", ast.get("name", ""), full)
-        except Exception as e:
-            log.exception("启动 AI 助理失败")
-            self.notify(f"❌ 启动失败 {ast.get('name', '')}",
-                        str(e)[:180], "error")
-
-    def open_ai_website(self, ast):
-        url = ast.get("website", "")
-        if not url:
-            self.notify("⚠️ 未配置官网地址", ast.get("name", ""), "warn")
-            return
-        try:
-            os.startfile(url)
-            self.notify(f"🌐 打开官网 {ast.get('name', '')}", url, "ok")
-        except Exception as e:
-            self.notify(f"❌ 打开官网失败 {ast.get('name', '')}",
-                        str(e)[:180], "error")
-
-    def open_ai_workspace(self, ast):
-        d = expand(ast.get("workspace_dir", ""))
-        if not d:
-            self.notify("⚠️ 未配置工作空间目录", ast.get("name", ""), "warn")
-            return
-        if not os.path.isdir(d):
-            self.notify("⚠️ 目录不存在", d, "warn")
-            return
-        os.startfile(d)
-        self.notify("📁 跳转工作空间", d, "ok")
-
-    def view_run_config(self, ast):
-        fp = expand(ast.get("run_config", ""))
-        title = f"{ast.get('name', '')} · 运行配置"
-        self._singleton_window(
-            "ai-run:" + fp,
-            lambda: ConfigViewer(self.root, title, fp,
-                                pretty_json=fp.lower().endswith(".json"),
-                                editable=True))
-
-    def view_agent_config(self, ast):
-        fp = expand(ast.get("agent_config", ""))
-        title = f"{ast.get('name', '')} · Agent 配置"
-        self._singleton_window(
-            "ai-agent:" + fp,
-            lambda: ConfigViewer(self.root, title, fp,
-                                pretty_json=fp.lower().endswith(".json"),
-                                editable=True))
-
     def _build_tray_menu(self):
         # 顶层：聚合健康状态圆圈（🟢正常 / 🟡告警 / 🔴异常），仅作状态指示
         items = [
@@ -1558,11 +1499,19 @@ class DesktopAIPet:
             pystray.Menu.SEPARATOR,
         ]
 
-        for m in self.monitors:
-            name = m["name"]
+        for m in self.menus:
+            name = m.get("name", "")
             actions = m.get("actions", [])
-            st = self._monitor_status(name)[0]
-            status = STATUS_EMOJI[st]
+            has_endpoint = bool(m.get("endpoint"))
+
+            if has_endpoint:
+                st = self._monitor_status(name)[0]
+                status = STATUS_EMOJI[st]
+                label_prefix = "{} ".format(status)
+            else:
+                # 无 endpoint 的纯菜单组（如 AI 助理）：不显示健康圆圈；
+                # 若配置了 icon（如 🧠），作为分组图标前缀展示
+                label_prefix = "{} ".format(m["icon"]) if m.get("icon") else ""
 
             if not m.get("enabled", True):
                 # 未启用：不显示状态圆圈，仅灰显名称
@@ -1572,11 +1521,14 @@ class DesktopAIPet:
 
             if not actions:
                 # 仅有健康监控、无快捷动作：直接展示状态圆圈+名称
-                items.append(pystray.MenuItem(
-                    "{} {}".format(status, name), None, enabled=False))
+                if label_prefix:
+                    items.append(pystray.MenuItem(
+                        "{}{}".format(label_prefix, name), None, enabled=False))
+                else:
+                    items.append(pystray.MenuItem(name, None, enabled=False))
                 continue
 
-            # 有动作：级联子菜单；级联标签用「圆圈 名称」统一左对齐
+            # 有动作：级联子菜单；级联标签用「前缀 名称」统一左对齐
             sub_items = []
             for act in actions:
                 sub_items.append(pystray.MenuItem(
@@ -1584,39 +1536,8 @@ class DesktopAIPet:
                                    act.get("label", "")),
                     self.make_handler(act, m)))
             items.append(pystray.MenuItem(
-                "{} {}".format(status, name),
+                "{}{}".format(label_prefix, name),
                 pystray.Menu(*sub_items)))
-
-        # AI 助理适配：位于监控项下方，顺序 Claude Code -> Codex -> OpenCode
-        for ast in self.ai_assistants:
-            if not ast.get("enabled", True):
-                continue
-            nm = ast.get("name", "")
-            sub = [
-                pystray.MenuItem(
-                    "🚀 启动 " + nm,
-                    lambda a=ast: self.post_ui(
-                        lambda a=a: self.launch_ai_assistant(a))),
-                pystray.MenuItem(
-                    "🌐 打开官网",
-                    lambda a=ast: self.post_ui(
-                        lambda a=a: self.open_ai_website(a))),
-                pystray.MenuItem(
-                    "📁 跳转工作空间",
-                    lambda a=ast: self.post_ui(
-                        lambda a=a: self.open_ai_workspace(a))),
-                pystray.MenuItem(
-                    "⚙️ 查看运行配置",
-                    lambda a=ast: self.post_ui(
-                        lambda a=a: self.view_run_config(a))),
-                pystray.MenuItem(
-                    "📄 查看 Agent 配置",
-                    lambda a=ast: self.post_ui(
-                        lambda a=a: self.view_agent_config(a))),
-            ]
-            items.append(pystray.MenuItem(
-                "{} {}".format(ast.get("icon", "🤖"), nm),
-                pystray.Menu(*sub)))
 
         # 将开机自启的勾选状态写入标签，避免 Windows 菜单 gutter 导致左侧空白参差
         startup_on = self._is_startup_enabled()
@@ -1630,13 +1551,16 @@ class DesktopAIPet:
                              lambda *a: self.post_ui(self.force_check)),
             pystray.MenuItem(startup_label,
                              lambda *a: self.post_ui(self._toggle_startup)),
-            pystray.MenuItem("📝 助理配置",
+            pystray.MenuItem("🛠️ 助理配置",
                              lambda *a: self.post_ui(
                                  lambda: self._singleton_window(
                                      "cfg:self",
                                      lambda: ConfigViewer(
                                          self.root, "助理配置",
-                                         str(CONFIG_PATH), editable=False)))),
+                                         str(CONFIG_PATH), editable=False,
+                                         on_save=self._reload_config)))),
+            pystray.MenuItem("🔄 重载配置",
+                             lambda *a: self.post_ui(self._reload_config)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🔁 重启", lambda *a: self.post_ui(self.restart_app)),
             pystray.MenuItem("❌ 退出", lambda *a: self.post_ui(self._on_exit)),
@@ -1725,7 +1649,9 @@ class DesktopAIPet:
     def run_health_check(self):
         if not self._running:
             return
-        enabled = [m for m in self.monitors if m.get("enabled", True)]
+        # 仅探测带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与探活
+        enabled = [m for m in self.menus
+                   if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
             self._schedule_next_check()
             return
@@ -1781,6 +1707,46 @@ class DesktopAIPet:
     # Config persistence
     # ------------------------------------------------------------------
 
+    def _reload_config(self):
+        """从磁盘重新读取 config.json，刷新全部运行状态（菜单/昵称/宠物参数等）。"""
+        try:
+            new_cfg = load_config()
+        except Exception:
+            log.exception("重载配置失败：无法读取 config.json")
+            self.notify("❌ 重载配置失败", "无法读取配置文件", "error")
+            return
+
+        self.cfg = new_cfg
+        self.ap = self.cfg.get("desktop_aipet", {})
+        self.menus = self.cfg.get("menus", [])
+
+        # 更新昵称 / 称呼 / 台词
+        self.nickname = (self.ap.get("nickname") or "").strip()
+        self.boss = (self.ap.get("boss") or "老板").strip() or "老板"
+        raw = self.cfg.get("greetings")
+        loaded = [str(g).strip() for g in raw
+                  if isinstance(g, str) and str(g).strip()] \
+            if isinstance(raw, list) else []
+        self.greetings = loaded or list(_DEFAULT_GREETINGS)
+
+        # 更新宠物参数
+        self.pet_visible = self.ap.get("pet_visible", True)
+        self.scale = self.ap.get("pet_scale", 1.0)
+        self.check_interval = int(self.ap.get("check_interval_s", 30))
+
+        # 重置监控状态，下一轮健康探活将使用最新配置
+        self.monitor_states.clear()
+
+        # 重建托盘菜单
+        self._refresh_menu()
+        if self.tray:
+            self.tray.title = self.assistant_display_name()
+
+        self.notify("✅ 配置已重载",
+                    f"menus: {len(self.menus)} 项 · 间隔: {self.check_interval}s", "ok")
+        log.info("配置已重载 | menus=%d | interval=%ds",
+                 len(self.menus), self.check_interval)
+
     def _save_config(self):
         try:
             if self.root and self.root.state() == "normal":
@@ -1815,7 +1781,6 @@ class DesktopAIPet:
                     self.root.after_cancel(aid)
                 except Exception:
                     pass
-        self._save_config()
         if self.tray:
             try:
                 self.tray.stop()
@@ -1855,7 +1820,7 @@ class DesktopAIPet:
     def run(self):
         self.setup()
         log.info("桌面AI助理 启动 | 大小: %dpx | 间隔: %ds | 监控: %d 项",
-                 int(72 * self.scale), self.check_interval, len(self.monitors))
+                 int(72 * self.scale), self.check_interval, len(self.menus))
 
         self.create_pet_window()
         if not self.pet_visible:
