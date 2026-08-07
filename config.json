@@ -199,5 +199,40 @@
     "今天的你依然在发光。",
     "有我在，琐事不烦心。",
     "我在这儿陪你度过每一天。"
+  ],
+  "ai_assistants": [
+    {
+      "name": "Claude Code",
+      "icon": "🧠",
+      "enabled": true,
+      "launch": "claude",
+      "launch_args": "--permission-mode bypassPermissions",
+      "website": "https://claude.com/claude-code",
+      "workspace_dir": ".claude",
+      "run_config": ".claude/settings.json",
+      "agent_config": "CLAUDE.md"
+    },
+    {
+      "name": "Codex",
+      "icon": "🟢",
+      "enabled": true,
+      "launch": "codex",
+      "launch_args": "",
+      "website": "https://github.com/openai/codex",
+      "workspace_dir": ".codex",
+      "run_config": ".codex/config.json",
+      "agent_config": "AGENTS.md"
+    },
+    {
+      "name": "OpenCode",
+      "icon": "🟣",
+      "enabled": true,
+      "launch": "opencode",
+      "launch_args": "",
+      "website": "https://opencode.ai",
+      "workspace_dir": ".opencode",
+      "run_config": ".opencode/opencode.json",
+      "agent_config": "AGENTS.md"
+    }
   ]
 }

@@ -968,6 +968,8 @@ class DesktopAIPet:
         self.cfg = load_config()
         self.ap = self.cfg.get("desktop_aipet", {})
         self.monitors = self.cfg.get("monitors", [])
+        # AI 助理适配（Claude Code / Codex / OpenCode），来自配置 ai_assistants
+        self.ai_assistants = self.cfg.get("ai_assistants", [])
         # 桌宠昵称：配置 desktop_aipet.nickname，托盘/气泡显示「桌面AI助理-昵称」
         self.nickname = (self.ap.get("nickname") or "").strip()
         # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」
@@ -1483,6 +1485,68 @@ class DesktopAIPet:
         base = "桌面AI助理"
         return f"{base}-{self.nickname}" if self.nickname else base
 
+    # -- AI 助理适配（Claude Code / Codex / OpenCode） --------------------
+
+    def launch_ai_assistant(self, ast):
+        """以 powershell 启动某 AI 助理；命令与默认参数均可配置。"""
+        cmd = (ast.get("launch") or "").strip()
+        if not cmd:
+            self.notify("⚠️ 未配置启动命令", ast.get("name", ""), "warn")
+            return
+        args = (ast.get("launch_args") or "").strip()
+        full = f"{cmd} {args}".strip() if args else cmd
+        try:
+            # 以 powershell 新开可见窗口启动，便于交互
+            launch(["powershell.exe", "-NoLogo", "-NoExit", "-Command", full],
+                   visible=True)
+            self.notify(f"🚀 启动 {ast.get('name', '')}", full, "ok")
+            log.info("启动 AI 助理: %s | %s", ast.get("name", ""), full)
+        except Exception as e:
+            log.exception("启动 AI 助理失败")
+            self.notify(f"❌ 启动失败 {ast.get('name', '')}",
+                        str(e)[:180], "error")
+
+    def open_ai_website(self, ast):
+        url = ast.get("website", "")
+        if not url:
+            self.notify("⚠️ 未配置官网地址", ast.get("name", ""), "warn")
+            return
+        try:
+            os.startfile(url)
+            self.notify(f"🌐 打开官网 {ast.get('name', '')}", url, "ok")
+        except Exception as e:
+            self.notify(f"❌ 打开官网失败 {ast.get('name', '')}",
+                        str(e)[:180], "error")
+
+    def open_ai_workspace(self, ast):
+        d = expand(ast.get("workspace_dir", ""))
+        if not d:
+            self.notify("⚠️ 未配置工作空间目录", ast.get("name", ""), "warn")
+            return
+        if not os.path.isdir(d):
+            self.notify("⚠️ 目录不存在", d, "warn")
+            return
+        os.startfile(d)
+        self.notify("📁 跳转工作空间", d, "ok")
+
+    def view_run_config(self, ast):
+        fp = expand(ast.get("run_config", ""))
+        title = f"{ast.get('name', '')} · 运行配置"
+        self._singleton_window(
+            "ai-run:" + fp,
+            lambda: ConfigViewer(self.root, title, fp,
+                                pretty_json=fp.lower().endswith(".json"),
+                                editable=True))
+
+    def view_agent_config(self, ast):
+        fp = expand(ast.get("agent_config", ""))
+        title = f"{ast.get('name', '')} · Agent 配置"
+        self._singleton_window(
+            "ai-agent:" + fp,
+            lambda: ConfigViewer(self.root, title, fp,
+                                pretty_json=fp.lower().endswith(".json"),
+                                editable=True))
+
     def _build_tray_menu(self):
         # 顶层：聚合健康状态圆圈（🟢正常 / 🟡告警 / 🔴异常），仅作状态指示
         items = [
@@ -1522,6 +1586,37 @@ class DesktopAIPet:
             items.append(pystray.MenuItem(
                 "{} {}".format(status, name),
                 pystray.Menu(*sub_items)))
+
+        # AI 助理适配：位于监控项下方，顺序 Claude Code -> Codex -> OpenCode
+        for ast in self.ai_assistants:
+            if not ast.get("enabled", True):
+                continue
+            nm = ast.get("name", "")
+            sub = [
+                pystray.MenuItem(
+                    "🚀 启动 " + nm,
+                    lambda a=ast: self.post_ui(
+                        lambda a=a: self.launch_ai_assistant(a))),
+                pystray.MenuItem(
+                    "🌐 打开官网",
+                    lambda a=ast: self.post_ui(
+                        lambda a=a: self.open_ai_website(a))),
+                pystray.MenuItem(
+                    "📁 跳转工作空间",
+                    lambda a=ast: self.post_ui(
+                        lambda a=a: self.open_ai_workspace(a))),
+                pystray.MenuItem(
+                    "⚙️ 查看运行配置",
+                    lambda a=ast: self.post_ui(
+                        lambda a=a: self.view_run_config(a))),
+                pystray.MenuItem(
+                    "📄 查看 Agent 配置",
+                    lambda a=ast: self.post_ui(
+                        lambda a=a: self.view_agent_config(a))),
+            ]
+            items.append(pystray.MenuItem(
+                "{} {}".format(ast.get("icon", "🤖"), nm),
+                pystray.Menu(*sub)))
 
         # 将开机自启的勾选状态写入标签，避免 Windows 菜单 gutter 导致左侧空白参差
         startup_on = self._is_startup_enabled()
