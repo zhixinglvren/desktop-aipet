@@ -166,9 +166,8 @@ STATUS_EMOJI = {"normal": "🟢", "warning": "🟡", "error": "🔴"}
 # 不在源码内置。下面仅为「配置缺失/为空」时的兜底文案（请勿在此扩充业务台词）。
 # ---------------------------------------------------------------------------
 _DEFAULT_GREETINGS = [
-    "{boss}，需要我帮你做什么？",
-    "{boss}，今天心情怎么样？",
-    "{boss}，我在这儿陪你呢～",
+    "需要我帮你做什么？",
+    "今天心情怎么样？"
 ]
 
 
@@ -971,16 +970,15 @@ class DesktopAIPet:
         self.monitors = self.cfg.get("monitors", [])
         # 桌宠昵称：配置 desktop_aipet.nickname，托盘/气泡显示「桌面AI助理-昵称」
         self.nickname = (self.ap.get("nickname") or "").strip()
-        # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」；
-        # greetings 中的 {boss} 占位符在加载时替换为该称呼。
+        # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」
         self.boss = (self.ap.get("boss") or "老板").strip() or "老板"
-        # 桌宠双击随机台词：优先取自配置 "greetings"，缺失/为空时回退兜底文案
+        # 桌宠随机台词：文案全部来自配置 "greetings"（仅文案，不含称呼）；
+        # 称呼「{boss}，」由本代码在展示时统一拼接，不写进配置。
         raw_greetings = self.cfg.get("greetings")
         loaded = [str(g).strip() for g in raw_greetings
                   if isinstance(g, str) and str(g).strip()] \
             if isinstance(raw_greetings, list) else []
-        self.greetings = [g.replace("{boss}", self.boss)
-                          for g in (loaded or list(_DEFAULT_GREETINGS))]
+        self.greetings = loaded or list(_DEFAULT_GREETINGS)
 
         self.pet_visible = self.ap.get("pet_visible", True)
         self.scale = self.ap.get("pet_scale", 1.0)
@@ -1166,7 +1164,7 @@ class DesktopAIPet:
         self.play_double_click_anim()
         if self.bubble:
             self.bubble.show(self.assistant_display_name(),
-                             random.choice(self.greetings),
+                             self._pick_greeting(),
                              "info", duration=4000)
 
     # ------------------------------------------------------------------
@@ -1261,6 +1259,11 @@ class DesktopAIPet:
             self._hide_from_taskbar()
             self._save_config()
 
+    def _pick_greeting(self):
+        """从 greetings 随机挑一句纯文案，并拼接称呼前缀「{boss}，」。"""
+        text = random.choice(self.greetings)
+        return f"{self.boss}，{text}"
+
     def toggle_pet(self):
         if self.root and self.root.state() == "normal":
             self.hide_pet()
@@ -1270,7 +1273,7 @@ class DesktopAIPet:
             # 随机选一句台词，在桌宠对话框（气泡）中展示。
             if self.root and self.bubble:
                 self.bubble.show(self.assistant_display_name(),
-                                 random.choice(self.greetings),
+                                 self._pick_greeting(),
                                  "info", duration=4000)
 
     # ------------------------------------------------------------------
