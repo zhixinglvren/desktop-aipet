@@ -1278,6 +1278,7 @@ class DesktopAIPet:
     def hide_pet(self):
         if self.root:
             self.root.withdraw()
+            self.pet_visible = False
             self._save_config()
 
     def show_pet(self):
@@ -1286,6 +1287,7 @@ class DesktopAIPet:
             self.root.lift()
             self.root.attributes("-topmost", True)
             self._hide_from_taskbar()
+            self.pet_visible = True
             self._save_config()
 
     def _pick_greeting(self):
@@ -1304,6 +1306,7 @@ class DesktopAIPet:
                 self.bubble.show(self.assistant_display_name(),
                                  self._pick_greeting(),
                                  "info", duration=4000)
+        self._refresh_menu()  # 更新菜单标签（召唤助理 ↔ 隐藏助理）
 
     # ------------------------------------------------------------------
     # Action execution
@@ -1427,7 +1430,7 @@ class DesktopAIPet:
                     self._launch_script(step.get("path"), step, monitor)
                     if i < len(steps) - 1 and delay > 0:
                         time.sleep(delay)
-                self.notify(f"🔄 {label}", "已完成停止 → 启动序列", "ok")
+                self.notify(f"🔄 {label}", "已完成停止 → 开始启动", "ok")
             except Exception as e:
                 log.exception("序列执行失败: %s", label)
                 self.notify(f"❌ {label} 失败", str(e)[:180], "error")
@@ -1542,10 +1545,13 @@ class DesktopAIPet:
 
 
             if not m.get("enabled", True):
-                # 未启用：不显示状态圆圈，仅灰显名称
-                items.append(pystray.MenuItem(
-                    "{}（未启用）".format(name), None, enabled=False))
-                continue
+                # 久坐提醒即使关闭也照常展开子菜单，不灰显
+                if m.get("type") == "health_reminder":
+                    pass  # fall through to build submenu
+                else:
+                    items.append(pystray.MenuItem(
+                        "{}（未启用）".format(name), None, enabled=False))
+                    continue
 
             if not actions:
                 # 仅有健康监控、无快捷动作：直接展示状态圆圈+名称
@@ -1563,16 +1569,22 @@ class DesktopAIPet:
             for act in actions:
                 atype = self._action_type(act)
                 label = act.get("label", "")
+                icon = act.get("icon", "▶")
                 if is_reminder:
-                    # 久坐提醒：开启/关闭项按当前 enabled 加勾选前缀
                     if atype == "reminder_enable":
-                        label = ("✅ " if rm_on else "") + label
+                        if rm_on:
+                            label = "{} {} [✓]".format(icon, label)
+                        else:
+                            label = "{} {}".format(icon, label)
                     elif atype == "reminder_disable":
-                        label = ("⏸ " if not rm_on else "") + label
+                        if not rm_on:
+                            label = "{} {} [✓]".format(icon, label)
+                        else:
+                            label = "{} {}".format(icon, label)
                     else:
-                        label = "{} {}".format(act.get("icon", "▶"), label)
+                        label = "{} {}".format(icon, label)
                 else:
-                    label = "{} {}".format(act.get("icon", "▶"), label)
+                    label = "{} {}".format(icon, label)
                 sub_items.append(pystray.MenuItem(label, self.make_handler(act, m)))
             items.append(pystray.MenuItem(
                 "{}{}".format(label_prefix, name),
@@ -1582,10 +1594,7 @@ class DesktopAIPet:
         startup_on = self._is_startup_enabled()
         startup_label = "⚙️ 开机自启 [{}]".format("✓" if startup_on else " ")
 
-        items += [
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("✨ 召唤助理",
-                             lambda *a: self.post_ui(self.toggle_pet)),
+        more_menu = pystray.Menu(
             pystray.MenuItem("🔄 健康检测",
                              lambda *a: self.post_ui(self.force_check)),
             pystray.MenuItem(startup_label,
@@ -1598,8 +1607,16 @@ class DesktopAIPet:
                                          self.root, "助理配置",
                                          str(CONFIG_PATH), editable=False,
                                          on_save=self._reload_config)))),
-            pystray.MenuItem("🔄 重载配置",
+            pystray.MenuItem("🌀 重载配置",
                              lambda *a: self.post_ui(self._reload_config)),
+        )
+
+        items += [
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                lambda _: "🙈 隐藏助理" if self.pet_visible else "✨ 召唤助理",
+                             lambda *a: self.post_ui(self.toggle_pet)),
+            pystray.MenuItem("📂 更多", more_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🔁 重启", lambda *a: self.post_ui(self.restart_app)),
             pystray.MenuItem("❌ 退出", lambda *a: self.post_ui(self._on_exit)),
@@ -1866,8 +1883,7 @@ class DesktopAIPet:
         if self.tray:
             self.tray.title = self.assistant_display_name()
 
-        self.notify("✅ 配置已重载",
-                    f"menus: {len(self.menus)} 项 · 间隔: {self.check_interval}s", "ok")
+        self.notify("✅ 配置已重载", "", "ok")
         log.info("配置已重载 | menus=%d | interval=%ds",
                  len(self.menus), self.check_interval)
 

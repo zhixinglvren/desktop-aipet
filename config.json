@@ -13,6 +13,36 @@
   },
   "menus": [
     {
+      "name": "久坐提醒",
+      "type": "health_reminder",
+      "enabled": false,
+      "start_hour": 7,
+      "end_hour": 22,
+      "interval_minutes": 1,
+      "skip_hours": [
+        9
+      ],
+      "message": "该起身活动一下身体啦～伸个懒腰、走两步，别久坐伤身哦！",
+      "actions": [
+        {
+          "type": "reminder_enable",
+          "icon": "🔛",
+          "label": "开启提醒"
+        },
+        {
+          "type": "reminder_disable",
+          "icon": "⏸",
+          "label": "关闭提醒"
+        },
+        {
+          "type": "reminder_test",
+          "icon": "🔔",
+          "label": "测试提醒"
+        }
+      ],
+      "icon": "❤️"
+    },
+    {
       "name": "Nanobot",
       "endpoint": "http://127.0.0.1:18790/health",
       "enabled": true,
@@ -45,6 +75,12 @@
               "tee_log": true
             }
           ]
+        },
+        {
+          "label": "打开官网",
+          "icon": "🏠",
+          "type": "url",
+          "url": "https://nanobot.wiki"
         },
         {
           "label": "打开 WebUI",
@@ -142,7 +178,7 @@
           "label": "打开官网",
           "icon": "🌐",
           "type": "url",
-          "url": "https://github.com/openai/codex"
+          "url": "https://developers.openai.com/codex"
         },
         {
           "label": "跳转工作空间",
@@ -169,7 +205,7 @@
     {
       "name": "OpenCode",
       "type": "ai_assistant",
-      "icon": "⬜",
+      "icon": "🔮",
       "enabled": true,
       "actions": [
         {
@@ -205,35 +241,6 @@
           "type": "popup_file",
           "path": "%USERPROFILE%\\.config\\opencode\\AGENTS.md",
           "title": "OpenCode Agent 配置"
-        }
-      ]
-    },
-    {
-      "name": "久坐提醒",
-      "type": "health_reminder",
-      "enabled": true,
-      "start_hour": 7,
-      "end_hour": 22,
-      "interval_minutes": 60,
-      "skip_hours": [
-        9
-      ],
-      "message": "该起身活动一下身体啦～伸个懒腰、走两步，别久坐伤身哦！",
-      "actions": [
-        {
-          "type": "reminder_enable",
-          "icon": "✅",
-          "label": "开启提醒"
-        },
-        {
-          "type": "reminder_disable",
-          "icon": "⏸",
-          "label": "关闭提醒"
-        },
-        {
-          "type": "reminder_test",
-          "icon": "🔔",
-          "label": "测试提醒"
         }
       ]
     }
