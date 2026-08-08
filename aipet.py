@@ -101,8 +101,13 @@ def deep_get(data, dotted, default=None):
 def load_config():
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
-            return json.load(f)
-    return {"desktop_aipet": {}, "menus": []}
+            cfg = json.load(f)
+    else:
+        cfg = {"desktop_aipet": {}, "menus": []}
+    # pet_character 已废弃，统一以 pet_theme 控制桌宠形象；
+    # 加载时即剔除该遗留键，避免被深合并重新写回磁盘。
+    cfg.setdefault("desktop_aipet", {}).pop("pet_character", None)
+    return cfg
 
 
 def save_config(cfg):
@@ -296,66 +301,434 @@ def gen_robot_frame(state, size, colors, frame_idx=0, expression=None):
     return img
 
 
-def generate_pet_frames(scale=1.0):
-    """生成桌宠各状态动画帧：中性机器人。
+def generate_pet_frames(scale=1.0, character="robot"):
+    """生成桌宠各状态动画帧。返回 {state: [PIL, ...]}。
 
-    返回 {state: [PIL, ...]}；另生成 'happy' 帧用于双击庆祝动画。
+    保留 normal/warning/error/happy/blink 键以兼容现有动画系统；
+    所有角色本体保持中性（不随服务状态变色），warning/error 仅作占位。
     """
     size = int(72 * scale)
-    base = {"normal": ROBOT_NEUTRAL}
     frames = {}
     for state in ("normal", "warning", "error"):
-        seq = [
-            gen_robot_frame("normal", size, base, frame_idx=0),
-            gen_robot_frame("normal", size, base, frame_idx=1),
+        frames[state] = [
+            gen_pet_frame(character, "normal", size, 0),
+            gen_pet_frame(character, "normal", size, 1),
         ]
-        frames[state] = seq
     frames["happy"] = [
-        gen_robot_frame("normal", size, base, frame_idx=0, expression="happy"),
-        gen_robot_frame("normal", size, base, frame_idx=1, expression="happy"),
+        gen_pet_frame(character, "normal", size, 0, "happy"),
+        gen_pet_frame(character, "normal", size, 1, "happy"),
     ]
     frames["blink"] = [
-        gen_robot_frame("normal", size, base, frame_idx=0, expression="blink"),
-        gen_robot_frame("normal", size, base, frame_idx=1, expression="blink"),
+        gen_pet_frame(character, "normal", size, 0, "blink"),
+        gen_pet_frame(character, "normal", size, 1, "blink"),
     ]
     return frames
 
 
-def generate_tray_icons():
-    """生成托盘图标（中性机器人）。返回 {state: PIL Image}。"""
+# ---------------------------------------------------------------------------
+# 角色绘制分发（通用表情 + 各角色轮廓）
+# ---------------------------------------------------------------------------
+
+# 菜单「切换助理」按此顺序循环；CHARACTER_INFO 提供展示名与 emoji
+CHARACTER_ORDER = ["robot", "labrador", "bluecat", "piggy", "bunny", "wukong", "pony"]
+CHARACTER_INFO = {
+    "robot":    {"name": "机器人", "emoji": "\U0001F916"},
+    "labrador": {"name": "拉布拉多", "emoji": "\U0001F436"},
+    "bluecat":  {"name": "蓝猫", "emoji": "\U0001F431"},
+    "piggy":    {"name": "小猪", "emoji": "\U0001F437"},
+    "bunny":    {"name": "小白兔", "emoji": "\U0001F430"},
+    "wukong":   {"name": "孙悟空", "emoji": "\U0001F412"},
+    "pony":     {"name": "小马", "emoji": "\U0001F434"},
+}
+
+
+def _face_eyes(d, expr, cx, eye_y, gap, ew, eh, eye_color, outline):
+    """绘制双眼；expr ∈ happy/blink/normal（warning/error 也按 normal 处理，
+    保持桌宠中性、不随服务状态变色）。"""
+    ow = max(2, int(eh * 0.28))
+    for ex in (cx - gap, cx + gap):
+        if expr == "happy":
+            d.arc([ex - ew / 2, eye_y, ex + ew / 2, eye_y + eh],
+                  200, 340, fill=eye_color, width=ow)
+        elif expr == "blink":
+            d.line([ex - ew / 2, eye_y + eh / 2, ex + ew / 2, eye_y + eh / 2],
+                   fill=outline, width=max(2, int(eh * 0.3)))
+        else:  # normal / warning / error 均保持中性
+            d.ellipse([ex - ew / 2, eye_y, ex + ew / 2, eye_y + eh],
+                      fill=eye_color, outline=outline, width=1)
+
+
+def _face_mouth(d, expr, cx, my, mw, color):
+    if expr == "happy":
+        d.arc([cx - mw, my, cx + mw, my + mw * 1.2], 20, 160, fill=color, width=2)
+    elif expr == "blink":
+        d.arc([cx - mw, my, cx + mw, my + mw], 220, 320, fill=color, width=2)
+    else:
+        d.arc([cx - mw, my, cx + mw, my + mw * 0.7], 220, 320, fill=color, width=2)
+
+
+def gen_dog_frame(state, size, frame_idx=0, expression=None):
+    """拉布拉多犬：垂耳 + 口鼻 + 坐姿身体 + 前爪 + 摇尾。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#c89b5a", ear="#9c7636", belly="#ecd9b0",
+             nose="#2e2118", eye="#2b2b2b", ol="#6d4c41")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 身体（坐姿）
+    bt, bb = S * 0.52 + bob, S * 0.88 + bob
+    bw = S * 0.52
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.20,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    d.ellipse([cx - S * 0.17, bt + S * 0.07, cx + S * 0.17, bb - S * 0.03],
+              fill=C["belly"])
+    # 前爪
+    for sx in (-1, 1):
+        px = cx + sx * S * 0.14
+        d.ellipse([px - S * 0.075, bb - S * 0.07, px + S * 0.075, bb + S * 0.05],
+                  fill=C["fur"], outline=C["ol"], width=2)
+    # 尾巴（翘起摇动）
+    d.line([cx + bw / 2 - 2, bt + S * 0.12, cx + S * 0.48, bt - S * 0.04],
+           fill=C["fur"], width=int(S * 0.07))
+    d.ellipse([cx + S * 0.44, bt - S * 0.10, cx + S * 0.52, bt - S * 0.02],
+              fill=C["fur"], outline=C["ol"], width=2)
+    # 头 + 垂耳
+    hcy = S * 0.34 + bob
+    R = S * 0.27
+    d.ellipse([cx - R * 1.20, hcy - R * 0.1, cx - R * 0.5, hcy + R * 1.2],
+              fill=C["ear"], outline=C["ol"], width=2)
+    d.ellipse([cx + R * 0.5, hcy - R * 0.1, cx + R * 1.20, hcy + R * 1.2],
+              fill=C["ear"], outline=C["ol"], width=2)
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    # 口鼻（浅色凸起 + 黑鼻头）
+    mu = S * 0.16
+    d.ellipse([cx - mu, hcy + R * 0.30, cx + mu, hcy + R * 0.95], fill=C["belly"],
+              outline=C["ol"], width=1)
+    d.ellipse([cx - S * 0.055, hcy + R * 0.32, cx + S * 0.055, hcy + R * 0.5],
+              fill=C["nose"], outline="#000000", width=1)
+    d.line([cx, hcy + R * 0.5, cx, hcy + R * 0.6], fill=C["ol"], width=2)
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy - R * 0.05, S * 0.12, S * 0.095, S * 0.12,
+               C["eye"], C["ol"])
+    _face_mouth(d, expr, cx, hcy + R * 0.6, S * 0.055, C["ol"])
+    return img
+
+
+def gen_cat_frame(state, size, frame_idx=0, expression=None):
+    """蓝猫：尖耳 + 蓝灰毛 + 胡须 + 坐姿身体 + 卷尾。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#6b7fb0", ear="#4a5a96", belly="#c5cae9",
+             nose="#f48fb1", eye="#ffe14d", ol="#283593")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 尾巴（上卷到身侧）
+    d.line([cx + S * 0.25, S * 0.82 + bob, cx + S * 0.49, S * 0.55 + bob,
+            cx + S * 0.40, S * 0.42 + bob], fill=C["fur"],
+           width=int(S * 0.08), joint="curve")
+    # 身体
+    bt, bb = S * 0.52 + bob, S * 0.88 + bob
+    bw = S * 0.50
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.20,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    d.ellipse([cx - S * 0.16, bt + S * 0.07, cx + S * 0.16, bb - S * 0.03],
+              fill=C["belly"])
+    for sx in (-1, 1):
+        px = cx + sx * S * 0.13
+        d.ellipse([px - S * 0.07, bb - S * 0.06, px + S * 0.07, bb + S * 0.05],
+                  fill=C["fur"], outline=C["ol"], width=2)
+    # 头 + 尖耳
+    hcy = S * 0.34 + bob
+    R = S * 0.27
+    d.polygon([(cx - R * 1.05, hcy - R * 0.55), (cx - R * 0.35, hcy - R * 0.95),
+               (cx - R * 0.15, hcy - R * 0.45)], fill=C["ear"], outline=C["ol"])
+    d.polygon([(cx + R * 1.05, hcy - R * 0.55), (cx + R * 0.35, hcy - R * 0.95),
+               (cx + R * 0.15, hcy - R * 0.45)], fill=C["ear"], outline=C["ol"])
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    # 小口鼻
+    d.polygon([(cx - S * 0.04, hcy + R * 0.35), (cx + S * 0.04, hcy + R * 0.35),
+               (cx, hcy + R * 0.5)], fill=C["nose"])
+    d.line([cx, hcy + R * 0.5, cx, hcy + R * 0.6], fill=C["ol"], width=2)
+    # 胡须
+    for dy in (-S * 0.01, S * 0.04):
+        d.line([cx - S * 0.10, hcy + R * 0.42 + dy, cx - S * 0.36, hcy + R * 0.34 + dy],
+               fill=C["ol"], width=1)
+        d.line([cx + S * 0.10, hcy + R * 0.42 + dy, cx + S * 0.36, hcy + R * 0.34 + dy],
+               fill=C["ol"], width=1)
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy - R * 0.05, S * 0.12, S * 0.10, S * 0.12,
+               C["eye"], C["ol"])
+    _face_mouth(d, expr, cx, hcy + R * 0.6, S * 0.055, C["ol"])
+    return img
+
+
+def gen_pig_frame(state, size, frame_idx=0, expression=None):
+    """小猪：小三角耳 + 大猪鼻（双鼻孔）+ 圆身 + 四蹄 + 卷尾。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#f8b9c4", ear="#f48fb1", snout="#f48fb1",
+             nose="#c2185b", eye="#3e2723", ol="#d81b60", hoof="#f06292")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 卷尾
+    d.line([cx + S * 0.26, S * 0.62 + bob, cx + S * 0.42, S * 0.55 + bob,
+            cx + S * 0.34, S * 0.46 + bob], fill=C["fur"],
+           width=int(S * 0.05), joint="curve")
+    # 身体
+    bt, bb = S * 0.50 + bob, S * 0.88 + bob
+    bw = S * 0.54
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.22,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    d.ellipse([cx - S * 0.18, bt + S * 0.06, cx + S * 0.18, bb - S * 0.02],
+              fill=C["snout"])
+    # 四蹄（前后各一对外露）
+    for sx in (-1, 1):
+        px = cx + sx * S * 0.16
+        d.ellipse([px - S * 0.08, bb - S * 0.05, px + S * 0.08, bb + S * 0.06],
+                  fill=C["hoof"], outline=C["ol"], width=2)
+    # 头 + 小三角耳
+    hcy = S * 0.33 + bob
+    R = S * 0.27
+    d.polygon([(cx - R * 1.0, hcy - R * 0.5), (cx - R * 0.6, hcy - R * 0.85),
+               (cx - R * 0.45, hcy - R * 0.35)], fill=C["ear"], outline=C["ol"])
+    d.polygon([(cx + R * 1.0, hcy - R * 0.5), (cx + R * 0.6, hcy - R * 0.85),
+               (cx + R * 0.45, hcy - R * 0.35)], fill=C["ear"], outline=C["ol"])
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    # 大猪鼻（双鼻孔）
+    sn = S * 0.20
+    d.ellipse([cx - sn, hcy + R * 0.30, cx + sn, hcy + R * 0.95], fill=C["snout"],
+              outline=C["ol"], width=2)
+    d.ellipse([cx - S * 0.075, hcy + R * 0.45, cx - S * 0.02, hcy + R * 0.62],
+              fill=C["nose"])
+    d.ellipse([cx + S * 0.02, hcy + R * 0.45, cx + S * 0.075, hcy + R * 0.62],
+              fill=C["nose"])
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy - R * 0.1, S * 0.12, S * 0.10, S * 0.11,
+               C["eye"], C["ol"])
+    _face_mouth(d, expr, cx, hcy + R * 0.95, S * 0.05, C["ol"])
+    return img
+
+
+def gen_bunny_frame(state, size, frame_idx=0, expression=None):
+    """小白兔：长耳（完整入画）+ 圆身 + 大后脚 + 小前爪 + 绒尾。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#fafafa", inner="#f8bbd0", nose="#f48fb1",
+             eye="#5d4037", ol="#bdbdbd", cheek="#f8bbd0", tail="#ffffff")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 绒尾
+    d.ellipse([cx + S * 0.22, S * 0.60 + bob, cx + S * 0.40, S * 0.78 + bob],
+              fill=C["tail"], outline=C["ol"], width=2)
+    # 身体
+    bt, bb = S * 0.54 + bob, S * 0.92 + bob
+    bw = S * 0.46
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.20,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    # 大后脚（扁椭圆）
+    for sx in (-1, 1):
+        px = cx + sx * S * 0.16
+        d.ellipse([px - S * 0.12, bb - S * 0.03, px + S * 0.12, bb + S * 0.08],
+                  fill=C["fur"], outline=C["ol"], width=2)
+    # 小前爪
+    for sx in (-1, 1):
+        px = cx + sx * S * 0.075
+        d.ellipse([px - S * 0.05, bb - S * 0.13, px + S * 0.05, bb - S * 0.02],
+                  fill=C["fur"], outline=C["ol"], width=1)
+    # 头
+    hcy = S * 0.42 + bob
+    R = S * 0.24
+    # 长耳：从画布顶部延伸到头部上方，左右各一，完整可见
+    for sx in (-1, 1):
+        ex = cx + sx * S * 0.13
+        d.ellipse([ex - S * 0.085, S * 0.02 + bob, ex + S * 0.085, hcy + bob],
+                  fill=C["fur"], outline=C["ol"], width=2)
+        d.ellipse([ex - S * 0.05, S * 0.05 + bob, ex + S * 0.05, hcy - S * 0.03 + bob],
+                  fill=C["inner"])
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    # 腮红
+    d.ellipse([cx - S * 0.22, hcy + S * 0.02, cx - S * 0.10, hcy + S * 0.10],
+              fill=C["cheek"])
+    d.ellipse([cx + S * 0.10, hcy + S * 0.02, cx + S * 0.22, hcy + S * 0.10],
+              fill=C["cheek"])
+    d.polygon([(cx - S * 0.035, hcy + S * 0.02), (cx + S * 0.035, hcy + S * 0.02),
+               (cx, hcy + S * 0.07)], fill=C["nose"])
+    d.arc([cx - S * 0.09, hcy + S * 0.05, cx + S * 0.09, hcy + S * 0.17],
+          20, 160, fill=C["ol"], width=2)
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy - S * 0.06, S * 0.11, S * 0.095, S * 0.12,
+               C["eye"], C["ol"])
+    _face_mouth(d, expr, cx, hcy + S * 0.07, S * 0.05, C["ol"])
+    return img
+
+
+def gen_wukong_frame(state, size, frame_idx=0, expression=None):
+    """孙悟空：棕毛猴（大圆耳 + 桃脸）+ 红金紧箍 + 长尾 + 双手持金箍棒。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#8d6e63", ear="#a1887f", face="#ffe0b2",
+             band="#e53935", gold="#ffd54f", eye="#3e2723", ol="#4e342e",
+             staff="#ffca28", staffband="#c62828")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 长尾（卷曲，身后）
+    d.line([cx + S * 0.18, S * 0.74 + bob, cx + S * 0.46, S * 0.66 + bob,
+            cx + S * 0.40, S * 0.48 + bob, cx + S * 0.54, S * 0.38 + bob],
+           fill=C["fur"], width=int(S * 0.05), joint="curve")
+    # 身体
+    bt, bb = S * 0.56 + bob, S * 0.90 + bob
+    bw = S * 0.46
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.20,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    d.ellipse([cx - S * 0.15, bt + S * 0.05, cx + S * 0.15, bb - S * 0.04],
+              fill=C["face"])
+    # 头
+    hcy = S * 0.32 + bob
+    R = S * 0.28
+    # 大圆耳（猴子特征）
+    for sx in (-1, 1):
+        ex = cx + sx * R * 1.0
+        d.ellipse([ex - R * 0.52, hcy - R * 0.10, ex + R * 0.52, hcy + R * 0.60],
+                  fill=C["fur"], outline=C["ol"], width=2)
+        d.ellipse([ex - R * 0.30, hcy - R * 0.0, ex + R * 0.30, hcy + R * 0.45],
+                  fill=C["ear"])
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    # 桃脸（浅色脸盘）
+    fr = R * 0.84
+    d.ellipse([cx - fr, hcy - R * 0.12, cx + fr, hcy + R * 1.08], fill=C["face"],
+              outline=C["ol"], width=1)
+    # 紧箍（红带 + 金箍）
+    band_y = hcy - R * 0.48
+    d.rounded_rectangle([cx - R * 0.92, band_y - S * 0.032,
+                         cx + R * 0.92, band_y + S * 0.032], radius=2, fill=C["band"])
+    d.ellipse([cx - S * 0.07, band_y - S * 0.045, cx + S * 0.07, band_y + S * 0.05],
+              fill=C["gold"], outline=C["ol"], width=1)
+    # 眼
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy + R * 0.10, S * 0.12, S * 0.09, S * 0.12,
+               C["eye"], C["ol"])
+    # 鼻 + 嘴（猴子小嘴）
+    d.ellipse([cx - S * 0.05, hcy + R * 0.58, cx + S * 0.05, hcy + R * 0.72],
+              fill=C["ol"])
+    _face_mouth(d, expr, cx, hcy + R * 0.74, S * 0.05, C["ol"])
+    # 金箍棒（最后画，在身体右侧斜向上，避免遮挡脸部；右手握持）
+    p1 = (cx + S * 0.22, S * 0.72)
+    p2 = (cx + S * 0.46, S * 0.10)
+    d.line([p1, p2], fill=C["staff"], width=int(S * 0.06))
+    # 棒方向单位向量 (0.407, -0.913)，垂直 (0.913, 0.407)
+    for t in (0.18, 0.82):
+        ax = p1[0] + (p2[0] - p1[0]) * t
+        ay = p1[1] + (p2[1] - p1[1]) * t
+        ox, oy = S * 0.027, S * 0.012
+        d.line([ax - ox, ay - oy, ax + ox, ay + oy], fill=C["staffband"],
+               width=int(S * 0.08))
+    # 金帽（两端）
+    for t in (0.0, 1.0):
+        ax = p1[0] + (p2[0] - p1[0]) * t
+        ay = p1[1] + (p2[1] - p1[1]) * t
+        d.ellipse([ax - S * 0.03, ay - S * 0.03, ax + S * 0.03, ay + S * 0.03],
+                  fill=C["gold"], outline=C["ol"], width=1)
+    # 右手握棒
+    d.ellipse([p1[0] - S * 0.07, p1[1] - S * 0.07,
+               p1[0] + S * 0.07, p1[1] + S * 0.07],
+              fill=C["fur"], outline=C["ol"], width=2)
+    # 左手自然下垂在身体左侧
+    d.ellipse([cx - S * 0.27, S * 0.64 + bob,
+               cx - S * 0.15, S * 0.76 + bob],
+              fill=C["fur"], outline=C["ol"], width=2)
+    return img
+
+
+def gen_pony_frame(state, size, frame_idx=0, expression=None):
+    """小马（矮种马）：长脸 + 口鼻 + 尖耳 + 鬃毛 + 四腿 + 飘逸长尾。"""
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    C = dict(fur="#e0b07a", mane="#8d5524", muzzle="#f0d2a8",
+             hoof="#5d4037", eye="#2b2b2b", ol="#6d4c41")
+    cx = S // 2
+    bob = 1 if frame_idx == 1 else 0
+    # 长尾（飘逸）
+    d.line([cx + S * 0.22, S * 0.56 + bob, cx + S * 0.44, S * 0.66 + bob,
+            cx + S * 0.38, S * 0.84 + bob], fill=C["mane"],
+           width=int(S * 0.06), joint="curve")
+    # 身体
+    bt, bb = S * 0.54 + bob, S * 0.86 + bob
+    bw = S * 0.50
+    d.rounded_rectangle([cx - bw / 2, bt, cx + bw / 2, bb], radius=S * 0.18,
+                        fill=C["fur"], outline=C["ol"], width=2)
+    # 四腿 + 蹄
+    for sx in (-1, 1):
+        for lx in (sx * S * 0.15, sx * S * 0.29):
+            d.rounded_rectangle([cx + lx - S * 0.045, bb - S * 0.03,
+                                 cx + lx + S * 0.045, bb + S * 0.10],
+                                radius=2, fill=C["fur"], outline=C["ol"], width=2)
+            d.ellipse([cx + lx - S * 0.05, bb + S * 0.07, cx + lx + S * 0.05,
+                       bb + S * 0.12], fill=C["hoof"])
+    # 颈
+    d.polygon([cx - S * 0.16, bt, cx + S * 0.16, bt,
+               cx + S * 0.12, S * 0.40, cx - S * 0.12, S * 0.40],
+              fill=C["fur"], outline=C["ol"], width=2)
+    # 头（圆颅 + 向下长口鼻）
+    hcy = S * 0.30 + bob
+    R = S * 0.22
+    d.polygon([(cx - R * 0.7, hcy - R * 0.7), (cx - R * 0.4, hcy - R * 1.15),
+               (cx - R * 0.15, hcy - R * 0.6)], fill=C["fur"], outline=C["ol"])
+    d.polygon([(cx + R * 0.7, hcy - R * 0.7), (cx + R * 0.4, hcy - R * 1.15),
+               (cx + R * 0.15, hcy - R * 0.6)], fill=C["fur"], outline=C["ol"])
+    d.polygon([(cx - R * 0.9, hcy - R * 0.4), (cx - R * 0.3, hcy - R * 1.05),
+               (cx + R * 0.15, hcy - R * 0.9), (cx - R * 0.1, hcy - R * 0.3)],
+              fill=C["mane"], outline=C["ol"])
+    d.ellipse([cx - R, hcy - R, cx + R, hcy + R], fill=C["fur"],
+              outline=C["ol"], width=2)
+    mz = S * 0.14
+    d.ellipse([cx - mz, hcy + R * 0.45, cx + mz, hcy + R * 1.25], fill=C["muzzle"],
+              outline=C["ol"], width=1)
+    d.ellipse([cx - S * 0.06, hcy + R * 0.85, cx - S * 0.015, hcy + R * 1.05],
+              fill=C["ol"])
+    d.ellipse([cx + S * 0.015, hcy + R * 0.85, cx + S * 0.06, hcy + R * 1.05],
+              fill=C["ol"])
+    expr = expression if expression in ("happy", "blink") else "normal"
+    _face_eyes(d, expr, cx, hcy - R * 0.0, S * 0.11, S * 0.09, S * 0.11,
+               C["eye"], C["ol"])
+    return img
+
+
+def gen_pet_frame(character, state, size, frame_idx=0, expression=None):
+    """按角色分发到对应绘制函数；未知角色回退到机器人。"""
+    fn = {
+        "robot":    lambda: gen_robot_frame(state, size, {"normal": ROBOT_NEUTRAL},
+                                            frame_idx, expression),
+        "labrador": lambda: gen_dog_frame(state, size, frame_idx, expression),
+        "bluecat":  lambda: gen_cat_frame(state, size, frame_idx, expression),
+        "piggy":    lambda: gen_pig_frame(state, size, frame_idx, expression),
+        "bunny":    lambda: gen_bunny_frame(state, size, frame_idx, expression),
+        "wukong":   lambda: gen_wukong_frame(state, size, frame_idx, expression),
+        "pony":     lambda: gen_pony_frame(state, size, frame_idx, expression),
+    }.get(character, lambda: gen_robot_frame(
+        state, size, {"normal": ROBOT_NEUTRAL}, frame_idx, expression))
+    return fn()
+
+
+def generate_tray_icons(character="robot"):
+    """生成托盘图标（与当前桌宠形象一致）。返回 {state: PIL Image}。"""
     ICONS_DIR.mkdir(exist_ok=True)
     result = {}
     for state in ("normal", "warning", "error"):
-        # 用 64x64 画，最后缩到 32/16，边缘更干净
-        S = 64
-        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        k = S / 32.0
-
-        def R(*v):
-            return [x * k for x in v]
-
-        # 中性机器人（不随服务状态变色）
-        d.line(R(14, 8, 14, 3), fill=ROBOT_NEUTRAL["body"], width=int(2 * k))
-        d.ellipse(R(11, 0, 17, 5), fill=ROBOT_NEUTRAL["antenna"])
-        d.rounded_rectangle(R(5, 7, 23, 22), radius=int(4 * k),
-                            fill=ROBOT_NEUTRAL["body"], outline="#111111",
-                            width=int(1 * k))
-        d.rounded_rectangle(R(8, 9, 20, 16), radius=int(2 * k),
-                            fill=ROBOT_NEUTRAL["screen"])
-        d.rectangle(R(10, 10.5, 12, 13.5), fill="#ffffff")
-        d.rectangle(R(16, 10.5, 18, 13.5), fill="#ffffff")
-        d.rounded_rectangle(R(2, 11, 5, 18), radius=int(1.5 * k),
-                            fill=ROBOT_NEUTRAL["body"])
-        d.rounded_rectangle(R(23, 11, 26, 18), radius=int(1.5 * k),
-                            fill=ROBOT_NEUTRAL["body"])
-        d.rounded_rectangle(R(7, 22, 11, 26), radius=int(1.5 * k),
-                            fill=ROBOT_NEUTRAL["body"])
-        d.rounded_rectangle(R(15, 22, 19, 26), radius=int(1.5 * k),
-                            fill=ROBOT_NEUTRAL["body"])
-
+        # 用 64x64 画，最后缩到 32，边缘更干净
+        img = gen_pet_frame(character, "normal", 64, 0)
         img = img.resize((32, 32), Image.LANCZOS)
-        path = ICONS_DIR / f"{state}.ico"
+        path = ICONS_DIR / f"{character}_{state}.ico"
         try:
             img.save(str(path), format="ICO", sizes=[(32, 32), (16, 16)])
         except Exception as e:  # 图标落盘失败不应阻断启动
@@ -1015,6 +1388,7 @@ class DesktopAIPet:
 
         self.pet_frames = {}
         self.pet_tk_frames = {}
+        self.pet_theme = "robot"
         self.current_state = "normal"
         self.current_frame_idx = 0
         self.anim_speed_ms = 800
@@ -1074,16 +1448,17 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def setup(self):
-        theme_dir = PETS_DIR / "robot"
+        self.pet_theme = self.ap.get("pet_theme") or "robot"
+        theme_dir = PETS_DIR / self.pet_theme
         theme_dir.mkdir(parents=True, exist_ok=True)
-        self.pet_frames = generate_pet_frames(self.scale)
+        self.pet_frames = generate_pet_frames(self.scale, self.pet_theme)
         for state, frames in self.pet_frames.items():
             for i, img in enumerate(frames):
                 try:
                     img.save(theme_dir / f"{state}_{i}.png")
                 except Exception:
                     pass
-        self.tray_icons = generate_tray_icons()
+        self.tray_icons = generate_tray_icons(self.pet_theme)
 
     # ------------------------------------------------------------------
     # Pet window
@@ -1308,6 +1683,47 @@ class DesktopAIPet:
                                  "info", duration=4000)
         self._refresh_menu()  # 更新菜单标签（召唤助理 ↔ 隐藏助理）
 
+    def _rebuild_pet_tk_frames(self):
+        """切换形象后，用新生成的 PIL 帧重建 Tk 帧并复位当前显示。"""
+        try:
+            if not hasattr(self, "pet_tk_frames"):
+                self.pet_tk_frames = {}
+            for state, frames in self.pet_frames.items():
+                self.pet_tk_frames[state] = [ImageTk.PhotoImage(f) for f in frames]
+            self.current_state = "normal"
+            self.current_frame_idx = 0
+            if self.pet_image_id is not None and self.canvas:
+                self.canvas.itemconfig(self.pet_image_id,
+                                       image=self.pet_tk_frames["normal"][0])
+        except Exception:
+            log.exception("重建桌宠帧失败")
+
+    def switch_character(self):
+        """菜单「切换助理」：循环切换到下一个桌宠形象并即时持久化。"""
+        if not (self.root and self.canvas):
+            return
+        try:
+            idx = CHARACTER_ORDER.index(self.pet_theme)
+        except ValueError:
+            idx = 0
+        nxt = CHARACTER_ORDER[(idx + 1) % len(CHARACTER_ORDER)]
+        self.pet_theme = nxt
+        self.ap["pet_theme"] = nxt
+        self._save_config()
+        self.pet_frames = generate_pet_frames(self.scale, nxt)
+        self._rebuild_pet_tk_frames()
+        try:
+            self.tray_icons = generate_tray_icons(nxt)
+            if self.tray:
+                self.update_tray_icon(self.current_state, True)
+        except Exception:
+            log.exception("切换助理：托盘图标更新失败")
+        info = CHARACTER_INFO.get(nxt, {"name": nxt, "emoji": ""})
+        self.notify("🔄 切换助理",
+                    "已切换为 {} {}".format(info["name"], info["emoji"]), "ok")
+        self._refresh_menu()
+        log.info("切换桌宠形象为 %s", nxt)
+
     # ------------------------------------------------------------------
     # Action execution
     # ------------------------------------------------------------------
@@ -1530,6 +1946,11 @@ class DesktopAIPet:
         ]
 
         for m in self.menus:
+            # enabled=false 的菜单项完全不展示（也不参与健康检测），
+            # 方便非技术用户把不需要的技术类菜单整体关闭
+            if not m.get("enabled", True):
+                continue
+
             name = m.get("name", "")
             actions = m.get("actions", [])
             has_endpoint = bool(m.get("endpoint"))
@@ -1543,16 +1964,6 @@ class DesktopAIPet:
                 # 若配置了 icon（如 🧠），作为分组图标前缀展示
                 label_prefix = "{} ".format(m["icon"]) if m.get("icon") else ""
 
-
-            if not m.get("enabled", True):
-                # 久坐提醒即使关闭也照常展开子菜单，不灰显
-                if m.get("type") == "health_reminder":
-                    pass  # fall through to build submenu
-                else:
-                    items.append(pystray.MenuItem(
-                        "{}（未启用）".format(name), None, enabled=False))
-                    continue
-
             if not actions:
                 # 仅有健康监控、无快捷动作：直接展示状态圆圈+名称
                 if label_prefix:
@@ -1565,7 +1976,7 @@ class DesktopAIPet:
             # 有动作：级联子菜单；级联标签用「前缀 名称」统一左对齐
             sub_items = []
             is_reminder = (m.get("type") == "health_reminder")
-            rm_on = m.get("enabled", True)
+            rm_on = m.get("reminder_enabled", True)
             for act in actions:
                 atype = self._action_type(act)
                 label = act.get("label", "")
@@ -1616,6 +2027,9 @@ class DesktopAIPet:
             pystray.MenuItem(
                 lambda _: "🙈 隐藏助理" if self.pet_visible else "✨ 召唤助理",
                              lambda *a: self.post_ui(self.toggle_pet)),
+            pystray.MenuItem(
+                "🔄 切换助理",
+                lambda *a: self.post_ui(self.switch_character)),
             pystray.MenuItem("📂 更多", more_menu),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("🔁 重启", lambda *a: self.post_ui(self.restart_app)),
@@ -1781,7 +2195,9 @@ class DesktopAIPet:
 
     def _maybe_remind(self):
         cfg = self.health_reminder
-        if not cfg.get("enabled", True):
+        # enabled=false：菜单整体隐藏、不做提醒；
+        # reminder_enabled=false：菜单存在但提醒本身关闭
+        if not cfg.get("enabled", True) or not cfg.get("reminder_enabled", True):
             return
         now = time.localtime()
         # 仅当「当前时刻(当天分钟数)」落在预计算的提醒时刻集合内才触发
@@ -1802,11 +2218,11 @@ class DesktopAIPet:
         log.info("久坐提醒触发 | %02d:%02d | %s", now.tm_hour, now.tm_min, msg)
 
     def set_reminder_enabled(self, on):
-        """开启/关闭久坐提醒，持久化到 config.json 并刷新托盘菜单状态。"""
+        """开启/关闭久坐提醒（reminder_enabled），持久化到 config.json 并刷新托盘菜单状态。"""
         try:
-            self.health_reminder["enabled"] = bool(on)
+            self.health_reminder["reminder_enabled"] = bool(on)
         except Exception:
-            self.health_reminder = {"enabled": bool(on)}
+            self.health_reminder = {"reminder_enabled": bool(on)}
         self._save_config()
         self._refresh_menu()
         self.notify("🪑 久坐提醒",
@@ -1871,6 +2287,17 @@ class DesktopAIPet:
         self.scale = self.ap.get("pet_scale", 1.0)
         self.check_interval = int(self.ap.get("check_interval_s", 30))
 
+        # 桌宠形象：若配置中 pet_theme 变化，则重新生成帧与托盘图标
+        new_char = self.ap.get("pet_theme") or "robot"
+        if new_char != self.pet_theme:
+            self.pet_theme = new_char
+            self.pet_frames = generate_pet_frames(self.scale, new_char)
+            self._rebuild_pet_tk_frames()
+            try:
+                self.tray_icons = generate_tray_icons(new_char)
+            except Exception:
+                log.exception("重载：托盘图标更新失败")
+
         # 久坐提醒：重新从 menus 中定位
         self.health_reminder = next(
             (m for m in self.menus if m.get("type") == "health_reminder"), {})
@@ -1903,6 +2330,8 @@ class DesktopAIPet:
             except Exception:
                 on_disk = {}
             merged = _deep_merge(on_disk, self.cfg)
+            # 兜底：确保已废弃的 pet_character 不会写回磁盘
+            merged.get("desktop_aipet", {}).pop("pet_character", None)
             save_config(merged)
         except Exception:
             log.exception("保存配置失败")

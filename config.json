@@ -4,7 +4,7 @@
     "pet_visible": true,
     "pet_scale": 1.0,
     "pet_x": 1400,
-    "pet_y": 700,
+    "pet_y": 699,
     "check_interval_s": 30,
     "log_retention_days": 7,
     "auto_restart_on_failure": false,
@@ -15,10 +15,11 @@
     {
       "name": "久坐提醒",
       "type": "health_reminder",
-      "enabled": false,
-      "start_hour": 7,
-      "end_hour": 22,
-      "interval_minutes": 1,
+      "enabled": true,
+      "reminder_enabled": true,
+      "start_hour": 9,
+      "end_hour": 21,
+      "interval_minutes": 60,
       "skip_hours": [
         9
       ],
