@@ -83,6 +83,132 @@
       ]
     },
     {
+      "name": "Claude Code",
+      "type": "ai_assistant",
+      "icon": "🌟",
+      "enabled": true,
+      "actions": [
+        {
+          "label": "启动 Claude Code",
+          "icon": "🚀",
+          "type": "powershell",
+          "command": "claude --permission-mode bypassPermissions",
+          "window": "visible",
+          "keep_open": true
+        },
+        {
+          "label": "打开官网",
+          "icon": "🌐",
+          "type": "url",
+          "url": "https://claude.com/claude-code"
+        },
+        {
+          "label": "跳转工作空间",
+          "icon": "📁",
+          "type": "open_workspace",
+          "path": "%USERPROFILE%\\.claude"
+        },
+        {
+          "label": "查看运行配置",
+          "icon": "⚙️",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.claude\\settings.json",
+          "title": "Claude Code 运行配置"
+        },
+        {
+          "label": "查看 Agent 配置",
+          "icon": "📄",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.claude\\CLAUDE.md",
+          "title": "Claude Code Agent 配置"
+        }
+      ]
+    },
+    {
+      "name": "Codex",
+      "type": "ai_assistant",
+      "icon": "💠",
+      "enabled": true,
+      "actions": [
+        {
+          "label": "启动 Codex",
+          "icon": "🚀",
+          "type": "powershell",
+          "command": "codex",
+          "window": "visible",
+          "keep_open": true
+        },
+        {
+          "label": "打开官网",
+          "icon": "🌐",
+          "type": "url",
+          "url": "https://github.com/openai/codex"
+        },
+        {
+          "label": "跳转工作空间",
+          "icon": "📁",
+          "type": "open_workspace",
+          "path": "%USERPROFILE%\\.codex"
+        },
+        {
+          "label": "查看运行配置",
+          "icon": "⚙️",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.codex\\config.toml",
+          "title": "Codex 运行配置"
+        },
+        {
+          "label": "查看 Agent 配置",
+          "icon": "📄",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.codex\\AGENTS.md",
+          "title": "Codex Agent 配置"
+        }
+      ]
+    },
+    {
+      "name": "OpenCode",
+      "type": "ai_assistant",
+      "icon": "⬜",
+      "enabled": true,
+      "actions": [
+        {
+          "label": "启动 OpenCode",
+          "icon": "🚀",
+          "type": "powershell",
+          "command": "opencode",
+          "window": "visible",
+          "keep_open": true
+        },
+        {
+          "label": "打开官网",
+          "icon": "🌐",
+          "type": "url",
+          "url": "https://opencode.ai"
+        },
+        {
+          "label": "跳转工作空间",
+          "icon": "📁",
+          "type": "open_workspace",
+          "path": "%USERPROFILE%\\.config\\opencode"
+        },
+        {
+          "label": "查看运行配置",
+          "icon": "⚙️",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.config\\opencode\\opencode.json",
+          "title": "OpenCode 运行配置"
+        },
+        {
+          "label": "查看 Agent 配置",
+          "icon": "📄",
+          "type": "popup_file",
+          "path": "%USERPROFILE%\\.config\\opencode\\AGENTS.md",
+          "title": "OpenCode Agent 配置"
+        }
+      ]
+    },
+    {
       "name": "久坐提醒",
       "type": "health_reminder",
       "enabled": true,

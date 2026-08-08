@@ -794,7 +794,8 @@ class ConfigViewer(tk.Toplevel):
             self.status.config(text="已保存 ✓")
             log.info("保存配置: %s", self.filepath)
             if callable(self.on_save):
-                self.after(200, self.on_save)
+                self.after(200, self.on_save)  # 延迟确保文件落盘
+
         except Exception as e:
             log.exception("保存配置失败")
             self.status.config(text=f"保存失败: {e}")
@@ -1493,7 +1494,8 @@ class DesktopAIPet:
     # ------------------------------------------------------------------
 
     def _overall_summary(self):
-        # 仅统计带 endpoint 的监控项；无 endpoint 的纯菜单组（如久坐提醒）不参与健康聚合
+        # 仅统计带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与健康聚合
+
         enabled = [m for m in self.menus
                    if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
@@ -1534,8 +1536,10 @@ class DesktopAIPet:
                 status = STATUS_EMOJI[st]
                 label_prefix = "{} ".format(status)
             else:
-                # 无 endpoint 的纯菜单组（如久坐提醒）：不显示健康圆圈
-                label_prefix = ""
+                # 无 endpoint 的纯菜单组（如 AI 助理）：不显示健康圆圈；
+                # 若配置了 icon（如 🧠），作为分组图标前缀展示
+                label_prefix = "{} ".format(m["icon"]) if m.get("icon") else ""
+
 
             if not m.get("enabled", True):
                 # 未启用：不显示状态圆圈，仅灰显名称
@@ -1552,7 +1556,7 @@ class DesktopAIPet:
                     items.append(pystray.MenuItem(name, None, enabled=False))
                 continue
 
-            # 有动作：级联子菜单；级联标签用「圆圈 名称」统一左对齐
+            # 有动作：级联子菜单；级联标签用「前缀 名称」统一左对齐
             sub_items = []
             is_reminder = (m.get("type") == "health_reminder")
             rm_on = m.get("enabled", True)
@@ -1684,7 +1688,8 @@ class DesktopAIPet:
     def run_health_check(self):
         if not self._running:
             return
-        # 仅探测带 endpoint 的监控项；无 endpoint 的纯菜单组（如久坐提醒）不参与探活
+        # 仅探测带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与探活
+
         enabled = [m for m in self.menus
                    if m.get("enabled", True) and m.get("endpoint")]
         if not enabled:
