@@ -13,6 +13,8 @@ jobs:
   # ---------------------------------------------------------------------------
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write   # 允许 action-gh-release 创建/更新 Release
     steps:
       - uses: actions/checkout@v4
 
@@ -27,15 +29,35 @@ jobs:
         run: .\build_installer.bat
 
       - name: Package update zip (code only; config & runtime preserved)
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          # 1) 源目录必须存在（由 build_installer.bat 产出 dist\aipet）
+          if (-not (Test-Path "dist\aipet")) { throw "dist\aipet 不存在，构建步骤可能未产出应用目录" }
+          # 2) 读取版本号（version.txt 形如 1.0.0，去掉可能的前导 v）
           $ver = (Get-Content version.txt).Trim() -replace '^v',''
+          if (-not $ver) { throw "version.txt 为空，无法命名升级包" }
           $zip = "desktop-aipet-windows-v$ver.zip"
           $stage = "update_stage"
           if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          robocopy dist\aipet $stage /E /XF config.json /XD pets icons logs
+          # 3) robocopy 成功复制文件时返回退出码 1（非错误），仅 >=8 才是真实失败。
+          #    GitHub Actions 会把非零退出码判为步骤失败，故此处中性化处理。
+          & robocopy.exe "dist\aipet" "$stage" /E /XF config.json /XD pets icons logs
+          $rc = $LASTEXITCODE
+          if ($rc -ge 8) { throw "robocopy 失败，退出码 $rc" }
+          # 4) 暂存目录必须非空，否则压缩包为空
+          $fileCount = (Get-ChildItem -Path $stage -Recurse -File | Measure-Object).Count
+          if ($fileCount -eq 0) { throw "暂存目录为空，未复制任何文件到升级包" }
+          # 5) 压缩并清理暂存目录
+          if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
           Remove-Item $stage -Recurse -Force
+          $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
+          Write-Host "Created $zip ($fileCount files, ${sizeMB} MB)"
+          # 必须显式清零 $LASTEXITCODE，否则 GitHub Actions 会把脚本结束时的非零值判为步骤失败。
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
