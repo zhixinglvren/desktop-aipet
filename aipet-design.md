@@ -461,13 +461,12 @@ pythonw aipet.py
 
 ### 15.2 开机静默启动
 
-`start.vbs` → 拷贝到 Startup 目录（`desktop-aipet.vbs`）：
+通过注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopAIPet` 实现；与安装包（WiX MSI）「开机自动启动」选项**写入同一个 Run 键**，因此两者状态天然同步：安装时勾选 → 托盘「⚙️ 开机自启」显示 `[✓]`，关闭则 `[ ]`，互不冲突。
 
-```vbs
-CreateObject("WScript.Shell").Run "pythonw E:\Portfolio\desktop-aipet\aipet.py", 0, False
-```
+- 冻结态（EXE）：命令为 `aipet.exe` 自身；
+- 开发态（源码）：命令为 `pythonw aipet.py`。
 
-托盘菜单"⚙️ 开机自启"可切换该快捷方式（`_toggle_startup`），标签同步 `[✓]`/`[ ]`。
+托盘菜单"⚙️ 开机自启"（`_toggle_startup`）读写该 Run 键，标签同步 `[✓]`/`[ ]`。
 
 ### 15.3 退出
 

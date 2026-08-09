@@ -3,13 +3,15 @@
     "pet_theme": "robot",
     "pet_visible": true,
     "pet_scale": 1.0,
-    "pet_x": 1400,
-    "pet_y": 699,
+    "pet_x": 1368,
+    "pet_y": 677,
     "check_interval_s": 30,
     "log_retention_days": 7,
     "auto_restart_on_failure": false,
     "nickname": "小新",
-    "boss": "老板"
+    "boss": "老板",
+    "update_repo": "zhixinglvren/desktop-aipet",
+    "update_check_hours": 6
   },
   "menus": [
     {

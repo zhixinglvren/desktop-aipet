@@ -4,8 +4,6 @@
 
 轻量级桌面助理：HTTP 健康探测 + 悬浮桌宠 + 系统托盘菜单。
 所有托盘/桌宠菜单动作均由 config.json 驱动，支持自定义。
-
-author: zhixinglvren
 """
 
 import json
@@ -24,6 +22,10 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timedelta
+import re
+import zipfile
+import tempfile
+import winreg
 
 import tkinter as tk
 from PIL import Image, ImageDraw, ImageTk
@@ -32,9 +34,28 @@ import pystray
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent
+# 路径约定：
+#   - 开发态：BASE_DIR = 脚本所在目录；运行期数据与资源都在此。
+#   - 冻结态(PyInstaller 单文件夹模式)：
+#       EXE_DIR  = 可执行文件所在目录（安装根目录，用户可写）→ 放运行期数据/配置；
+#       RES_DIR  = sys._MEIPASS（即打包内的 _internal）→ 只读资源（version.txt / 默认 config.json）。
+#     注意 PyInstaller 6.x 会把 --add-data 的文件放到 _internal，故资源与应用数据分层，
+#     不能混用 sys.executable.parent 来读 version.txt。
+if getattr(sys, "frozen", False):
+    EXE_DIR = Path(sys.executable).parent
+    # onefile: 资源在 sys._MEIPASS；onedir: 资源在 exe 同级的 _internal 目录
+    _meipass = getattr(sys, "_MEIPASS", None)
+    RES_DIR = Path(_meipass if _meipass else EXE_DIR / "_internal")
+    BASE_DIR = EXE_DIR
+else:
+    EXE_DIR = RES_DIR = BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
-PETS_DIR = BASE_DIR / "pets"
+if getattr(sys, "frozen", False):
+    # onefile: 资源在 sys._MEIPASS；onedir: 资源在 exe 同级的 _internal 目录
+    _meipass = getattr(sys, "_MEIPASS", None)
+    PETS_DIR = (Path(_meipass) if _meipass else EXE_DIR / "_internal") / "pets"
+else:
+    PETS_DIR = BASE_DIR / "pets"
 ICONS_DIR = BASE_DIR / "icons"
 LOGS_DIR = BASE_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
@@ -42,6 +63,10 @@ LOGS_DIR.mkdir(exist_ok=True)
 # Win32 process creation flags
 CREATE_NEW_CONSOLE = 0x00000010
 CREATE_NO_WINDOW = 0x08000000
+
+# 版本与更新：单一版本来源为同目录 version.txt；GitHub 仓库可在 config.json 的
+# desktop_aipet.update_repo 覆盖，未配置时使用此占位值（需用户填写）。
+DEFAULT_UPDATE_REPO = "owner/repo"
 
 # tkinter 透明色（宠物窗口与气泡共用）
 TRANSPARENT_COLOR = "#fe01fe"
@@ -99,6 +124,16 @@ def deep_get(data, dotted, default=None):
 
 
 def load_config():
+    # 安装后首次运行：若根目录无 config.json，则从打包内拷贝默认配置（自举）。
+    # 这样用户后续修改持久化在 EXE_DIR/config.json，升级时用 /XF 排除它即可保留。
+    if not CONFIG_PATH.exists():
+        src = RES_DIR / "config.json"
+        if src.exists() and src != CONFIG_PATH:
+            try:
+                shutil.copy2(src, CONFIG_PATH)
+                log.info("已从内置默认配置自举写入 %s", CONFIG_PATH)
+            except Exception:
+                log.exception("配置自举失败")
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
@@ -158,6 +193,81 @@ def _deep_merge(base, override):
                     return result
         return override
     return override
+
+
+# ---------------------------------------------------------------------------
+# 版本与更新（GitHub Releases 作为更新源）
+# ---------------------------------------------------------------------------
+# 单一版本来源：同目录 version.txt（如 "1.0.0" 或 "v1.0.0"）。
+# 跨平台预留：release 资产按平台关键词匹配（windows / macos / linux），
+# 本期仅实现 Windows；其余平台可在 select_update_asset 中扩展。
+
+def parse_version(s):
+    """将版本字符串解析为 (major, minor, patch) 三元组，便于比较。"""
+    s = (s or "").lstrip("vV").strip()
+    parts = []
+    for tok in re.split(r"[.\-+]", s):
+        if tok.isdigit():
+            parts.append(int(tok))
+        elif tok == "":
+            continue
+        else:
+            break
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def version_to_str(v):
+    return ".".join(map(str, v))
+
+
+def get_app_version():
+    """读取内置版本号；缺失时返回 (0,0,0)。资源(version.txt)在冻结态位于 _MEIPASS。"""
+    try:
+        p = RES_DIR / "version.txt"
+        if p.exists():
+            return parse_version(p.read_text(encoding="utf-8").strip())
+    except Exception:
+        pass
+    return (0, 0, 0)
+
+
+def get_update_repo(cfg):
+    """GitHub 仓库 owner/repo；未配置时使用占位值（需用户在 config 填写）。"""
+    da = cfg.get("desktop_aipet", {}) if isinstance(cfg, dict) else {}
+    return da.get("update_repo") or DEFAULT_UPDATE_REPO
+
+
+def select_update_asset(assets, platform=None):
+    """按当前平台挑选 release 资产。跨平台预留，本期仅 Windows。
+
+    同平台可能同时挂了安装包（.msi/.exe）与升级用代码包（.zip），
+    优先选择 .zip 作为「覆盖升级」资产，避免误下载安装包。
+    """
+    platform = (platform or sys.platform or "").lower()
+    if platform.startswith("win"):
+        kws = ("windows", "win")
+    elif platform.startswith("darwin"):
+        kws = ("macos", "mac", "darwin")
+    elif platform.startswith("linux"):
+        kws = ("linux",)
+    else:
+        kws = ()
+    matched = []
+    for a in assets:
+        name = (a.get("name") or "").lower()
+        if any(kw in name for kw in kws):
+            matched.append(a)
+    if matched:
+        for a in matched:
+            if (a.get("name") or "").lower().endswith(".zip"):
+                return a
+        return matched[0]
+    for a in assets:
+        if (a.get("name") or "").lower().endswith(".zip"):
+            return a
+    return assets[0] if assets else None
 
 
 # ---------------------------------------------------------------------------
@@ -301,13 +411,48 @@ def gen_robot_frame(state, size, colors, frame_idx=0, expression=None):
     return img
 
 
+def _load_robot_frames_from_pets(size):
+    """robot 主题直接加载 pets/robot 图片帧，使其与 normal_1.png 等视觉一致。
+
+    图片缺失（或 normal 帧不存在）时返回 None，由调用方回退到代码绘制。
+    """
+    d = PETS_DIR / "robot"
+    if not d.is_dir():
+        return None
+
+    def load(state):
+        imgs = []
+        for i in (0, 1):
+            p = d / f"{state}_{i}.png"
+            if p.exists():
+                im = Image.open(p).convert("RGBA")
+                im = im.resize((size, size), Image.LANCZOS)
+                imgs.append(im)
+        return imgs
+
+    out = {s: load(s) for s in ("normal", "warning", "error", "happy", "blink")}
+    if not out.get("normal"):
+        return None
+    # 缺失状态用 normal 帧兜底，保证动画键集合完整
+    for s in ("warning", "error", "happy", "blink"):
+        if not out.get(s):
+            out[s] = out["normal"]
+    return out
+
+
 def generate_pet_frames(scale=1.0, character="robot"):
     """生成桌宠各状态动画帧。返回 {state: [PIL, ...]}。
 
     保留 normal/warning/error/happy/blink 键以兼容现有动画系统；
     所有角色本体保持中性（不随服务状态变色），warning/error 仅作占位。
+    robot 主题优先使用 pets/robot 下的图片资源（与 normal_1.png 一致），
+    其余主题沿用代码绘制。
     """
     size = int(72 * scale)
+    if character == "robot":
+        robot_frames = _load_robot_frames_from_pets(size)
+        if robot_frames:
+            return robot_frames
     frames = {}
     for state in ("normal", "warning", "error"):
         frames[state] = [
@@ -725,9 +870,17 @@ def generate_tray_icons(character="robot"):
     ICONS_DIR.mkdir(exist_ok=True)
     result = {}
     for state in ("normal", "warning", "error"):
-        # 用 64x64 画，最后缩到 32，边缘更干净
-        img = gen_pet_frame(character, "normal", 64, 0)
-        img = img.resize((32, 32), Image.LANCZOS)
+        # robot 主题直接用 normal_1.png（与运行时桌宠形象一致）；其余走代码绘制
+        if character == "robot":
+            p = PETS_DIR / "robot" / "normal_1.png"
+            if p.exists():
+                img = Image.open(p).convert("RGBA").resize((32, 32), Image.LANCZOS)
+            else:
+                img = gen_pet_frame(character, "normal", 64, 0).resize(
+                    (32, 32), Image.LANCZOS)
+        else:
+            img = gen_pet_frame(character, "normal", 64, 0).resize(
+                (32, 32), Image.LANCZOS)
         path = ICONS_DIR / f"{character}_{state}.ico"
         try:
             img.save(str(path), format="ICO", sizes=[(32, 32), (16, 16)])
@@ -1414,6 +1567,15 @@ class DesktopAIPet:
         self._ui_queue = queue.Queue()
         self._open_windows = {}
 
+        # 更新检测：内置版本、待升级信息、GitHub 仓库（config 可覆盖）、自动检查间隔
+        self._app_version = get_app_version()
+        self._pending_update = None  # {"version","tag","url","name"}
+        self.update_repo = get_update_repo(self.cfg)
+        self.update_check_hours = float(self.ap.get("update_check_hours", 6))
+        self._update_timer = None
+        # 开机自启：与安装器（WiX 写入同一 Run 键）共用状态，天然同步
+        self._startup_reg_name = "DesktopAIPet"
+
     # ------------------------------------------------------------------
     # UI thread marshalling —— 关键：托盘回调运行在托盘线程，
     # 所有 tkinter 操作必须回到主线程执行，否则静默崩溃。
@@ -1719,7 +1881,7 @@ class DesktopAIPet:
         except Exception:
             log.exception("切换助理：托盘图标更新失败")
         info = CHARACTER_INFO.get(nxt, {"name": nxt, "emoji": ""})
-        self.notify("🔄 切换助理",
+        self.notify("🎭 切换助理",
                     "已切换为 {} {}".format(info["name"], info["emoji"]), "ok")
         self._refresh_menu()
         log.info("切换桌宠形象为 %s", nxt)
@@ -2005,8 +2167,8 @@ class DesktopAIPet:
         startup_on = self._is_startup_enabled()
         startup_label = "⚙️ 开机自启 [{}]".format("✓" if startup_on else " ")
 
-        more_menu = pystray.Menu(
-            pystray.MenuItem("🔄 健康检测",
+        more_items = [
+            pystray.MenuItem("🩺 健康检测",
                              lambda *a: self.post_ui(self.force_check)),
             pystray.MenuItem(startup_label,
                              lambda *a: self.post_ui(self._toggle_startup)),
@@ -2020,7 +2182,19 @@ class DesktopAIPet:
                                          on_save=self._reload_config)))),
             pystray.MenuItem("🌀 重载配置",
                              lambda *a: self.post_ui(self._reload_config)),
-        )
+        ]
+        # 更新：有可用新版本时额外显示升级项
+        if getattr(self, "_pending_update", None):
+            more_items.append(
+                pystray.MenuItem(
+                    "⬆️ 升级到 v{}".format(self._pending_update["version"]),
+                    lambda *a: self.post_ui(self.do_upgrade)))
+        else:
+            more_items.append(
+                pystray.MenuItem("📡 检查更新",
+                                 lambda *a: self.post_ui(
+                                     lambda: self.check_update(notify=True))))
+        more_menu = pystray.Menu(*more_items)
 
         items += [
             pystray.Menu.SEPARATOR,
@@ -2028,7 +2202,7 @@ class DesktopAIPet:
                 lambda _: "🙈 隐藏助理" if self.pet_visible else "✨ 召唤助理",
                              lambda *a: self.post_ui(self.toggle_pet)),
             pystray.MenuItem(
-                "🔄 切换助理",
+                "🎭 切换助理",
                 lambda *a: self.post_ui(self.switch_character)),
             pystray.MenuItem("📂 更多", more_menu),
             pystray.Menu.SEPARATOR,
@@ -2041,31 +2215,46 @@ class DesktopAIPet:
     # Startup entry
     # ------------------------------------------------------------------
 
-    def _startup_vbs(self):
-        return os.path.join(
-            os.environ.get("APPDATA", ""),
-            r"Microsoft\Windows\Start Menu\Programs\Startup",
-            "desktop-aipet.vbs")
+    # ------------------------------------------------------------------
+    # Startup entry —— 注册表 Run 键（与 MSI 安装器的「开机自启」选项共用同一状态）
+    # ------------------------------------------------------------------
+    _STARTUP_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    def _startup_command(self):
+        """开机启动命令：冻结态指向 exe 自身，开发态用 pythonw 跑脚本。"""
+        if getattr(sys, "frozen", False):
+            return '"{}"'.format(os.path.normpath(sys.executable))
+        return '"{}" "{}"'.format(
+            os.path.normpath(sys.executable),
+            os.path.normpath(BASE_DIR / "aipet.py"))
 
     def _is_startup_enabled(self):
-        return os.path.exists(self._startup_vbs())
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._STARTUP_REG_PATH) as k:
+                winreg.QueryValueEx(k, self._startup_reg_name)
+            return True
+        except OSError:
+            return False
+
+    def _set_startup(self, enabled):
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self._STARTUP_REG_PATH,
+                            0, winreg.KEY_SET_VALUE) as k:
+            if enabled:
+                winreg.SetValueEx(k, self._startup_reg_name, 0,
+                                  winreg.REG_SZ, self._startup_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, self._startup_reg_name)
+                except OSError:
+                    pass
 
     def _toggle_startup(self):
-        vbs = self._startup_vbs()
         try:
-            if os.path.exists(vbs):
-                os.remove(vbs)
-                self.notify("⚙️ 开机自启", "已关闭", "info")
-            else:
-                src = BASE_DIR / "start.vbs"
-                vbs_content = (
-                    'CreateObject("WScript.Shell").Run '
-                    f'"pythonw {BASE_DIR / "aipet.py"}", 0, False\n')
-                if not src.exists() or src.read_text(encoding="utf-8") != vbs_content:
-                    src.write_text(vbs_content, encoding="utf-8")
-                os.makedirs(os.path.dirname(vbs), exist_ok=True)
-                shutil.copy2(src, vbs)
-                self.notify("⚙️ 开机自启", "已开启", "ok")
+            enabled = not self._is_startup_enabled()
+            self._set_startup(enabled)
+            self.notify("⚙️ 开机自启",
+                        "已开启" if enabled else "已关闭",
+                        "ok" if enabled else "info")
             # 刷新菜单以更新开机自启标签中的 [✓]/[ ]
             self._refresh_menu()
         except Exception as e:
@@ -2113,7 +2302,7 @@ class DesktopAIPet:
             except Exception:
                 pass
         self._check_feedback = True
-        self.notify("🔍 健康检测", "正在检测服务状态…", "info")
+        self.notify("🩺 健康检测", "正在检测服务状态…", "info")
         self.run_health_check()
 
     def run_health_check(self):
@@ -2363,6 +2552,159 @@ class DesktopAIPet:
         log.info("桌面AI助理 已退出")
         os._exit(0)
 
+    # ------------------------------------------------------------------
+    # 更新检测与升级（GitHub Releases 作为更新源）
+    # ------------------------------------------------------------------
+    def check_update(self, notify=True):
+        """检查 GitHub 是否有更高版本；有则记录 _pending_update 并提醒。"""
+        try:
+            import httpx
+            repo = self.update_repo
+            if not repo or repo == DEFAULT_UPDATE_REPO:
+                if notify:
+                    self.notify("📡 更新", "未配置 GitHub 仓库，无法检查更新",
+                                "info")
+                return
+            cur_v = self._app_version
+            url = "https://api.github.com/repos/{}/releases/latest".format(repo)
+            with httpx.Client(timeout=15, follow_redirects=True,
+                              headers={"User-Agent": "desktop-aipet-updater"}) as c:
+                r = c.get(url)
+                if r.status_code == 404:
+                    # GitHub 在仓库没有任何已发布 Release 时，对
+                    # /releases/latest 返回 404，属正常情况而非错误。
+                    self._pending_update = None
+                    if notify:
+                        self.notify("✅ 已是最新",
+                                    "当前 v{}（仓库暂无发布版本）".format(
+                                        version_to_str(cur_v)), "ok")
+                    return
+                if r.status_code != 200:
+                    if notify:
+                        self.notify("📡 更新",
+                                    "检查失败 HTTP {}".format(r.status_code),
+                                    "error")
+                    return
+                data = r.json()
+            tag = data.get("tag_name", "")
+            remote_v = parse_version(tag)
+            if not any(remote_v):
+                if notify:
+                    self.notify("📡 更新", "未获取到版本信息", "error")
+                return
+            assets = data.get("assets", [])
+            asset = select_update_asset(assets)
+            if remote_v > cur_v:
+                self._pending_update = {
+                    "version": version_to_str(remote_v),
+                    "tag": tag,
+                    "url": asset.get("browser_download_url") if asset else None,
+                    "name": asset.get("name") if asset else None,
+                }
+                self.notify(
+                    "🎉 发现新版本 v{}".format(version_to_str(remote_v)),
+                    "当前 v{}，点击「⬆️ 升级」可一键更新".format(
+                        version_to_str(cur_v)),
+                    "ok")
+                self._refresh_menu()
+            else:
+                self._pending_update = None
+                if notify:
+                    self.notify("✅ 已是最新",
+                                "当前 v{}".format(version_to_str(cur_v)), "ok")
+        except Exception as e:
+            log.exception("检查更新失败")
+            if notify:
+                self.notify("❌ 更新检查失败", str(e)[:180], "error")
+
+    def do_upgrade(self):
+        """下载最新 release 资产并覆盖本地代码（保留 config/pets/icons/logs）。"""
+        info = getattr(self, "_pending_update", None)
+        if not info or not info.get("url"):
+            self.notify("⬆️ 升级", "暂无可用更新", "info")
+            return
+        try:
+            import httpx
+            self.notify("⬆️ 升级", "正在下载 v{} ...".format(info["version"]),
+                        "info")
+            tmp = tempfile.mkdtemp(prefix="aipet_upg_")
+            zip_path = os.path.join(tmp, "update.zip")
+            with httpx.Client(timeout=180, follow_redirects=True,
+                              headers={"User-Agent": "desktop-aipet-updater"}) as c:
+                with c.stream("GET", info["url"]) as resp:
+                    resp.raise_for_status()
+                    with open(zip_path, "wb") as f:
+                        for chunk in resp.iter_bytes():
+                            f.write(chunk)
+            extract_dir = os.path.join(tmp, "extracted")
+            os.makedirs(extract_dir, exist_ok=True)
+            with zipfile.ZipFile(zip_path) as z:
+                z.extractall(extract_dir)
+            # 定位含可执行文件的真实根目录（release 资产可能包了一层文件夹）
+            src_root = extract_dir
+            for root, _dirs, files in os.walk(extract_dir):
+                if "aipet.exe" in files or "aipet.py" in files:
+                    src_root = root
+                    break
+            # 生成更新批处理：退出后覆盖【安装根目录】(EXE_DIR) 的代码，
+            # 保留配置与运行时数据。冻结态 EXE_DIR = sys.executable 所在目录。
+            bat = os.path.join(tmp, "update.bat")
+            exe_path = sys.executable
+            py_path = os.path.join(BASE_DIR, "aipet.py")
+            lines = [
+                "@echo off",
+                "chcp 65001 >nul",
+                "timeout /t 2 /nobreak >nul",
+                'robocopy "{src}" "{dst}" /E /PURGE /XF config.json /XD pets icons logs'.format(
+                    src=src_root, dst=str(EXE_DIR)),
+                'if exist "{exe}" ('.format(exe=exe_path),
+                '  start "" "{exe}"'.format(exe=exe_path),
+                ") else (",
+                '  start "" "{pyexe}" "{pyscript}"'.format(
+                    pyexe=sys.executable, pyscript=py_path),
+                ")",
+                'rmdir /s /q "{tmp}"'.format(tmp=tmp),
+            ]
+            with open(bat, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+            # 保存配置并退出，由 update.bat 完成覆盖与重启
+            self._save_config()
+            if self.tray:
+                try:
+                    self.tray.stop()
+                except Exception:
+                    pass
+            if self.root:
+                try:
+                    self.root.destroy()
+                except Exception:
+                    pass
+            subprocess.Popen(bat, creationflags=CREATE_NEW_CONSOLE, shell=True)
+            os._exit(0)
+        except Exception as e:
+            log.exception("升级失败")
+            self.notify("❌ 升级失败", str(e)[:180], "error")
+
+    def _schedule_update_check(self):
+        """后台线程静默检查更新，并按配置间隔循环。"""
+        try:
+            threading.Thread(target=self.check_update, kwargs={"notify": False},
+                             daemon=True, name="update-check").start()
+        except Exception:
+            log.exception("启动更新检查线程失败")
+        try:
+            self._update_timer = self.root.after(
+                int(self.update_check_hours * 3600 * 1000),
+                self._schedule_update_check)
+        except Exception:
+            pass
+
+    def _start_auto_update(self):
+        """启动后延迟一段时间首次检查更新，再进入循环。"""
+        if not getattr(self, "root", None):
+            return
+        self._update_timer = self.root.after(60000, self._schedule_update_check)
+
     def restart_app(self):
         """重启桌面宠物：先停掉当前托盘/窗口并保存状态，后台拉起新实例后退出。"""
         try:
@@ -2377,10 +2719,13 @@ class DesktopAIPet:
                     self.root.destroy()
                 except Exception:
                     pass
-            # 后台启动新实例（与 start.vbs 等价：pythonw aipet.py）
-            exe = sys.executable
-            script = str(BASE_DIR / "aipet.py")
-            subprocess.Popen([exe, script], creationflags=CREATE_NO_WINDOW)
+            # 冻结态直接拉起 exe 自身；开发态用 pythonw 跑脚本
+            if getattr(sys, "frozen", False):
+                args = []
+            else:
+                args = [str(BASE_DIR / "aipet.py")]
+            subprocess.Popen([sys.executable, *args],
+                             creationflags=CREATE_NO_WINDOW)
             log.info("重启：已启动新实例，准备退出当前实例")
         except Exception:
             log.exception("重启失败")
@@ -2403,6 +2748,7 @@ class DesktopAIPet:
         self.run_health_check()
         self.start_health_reminder()
         self.start_animation()
+        self._start_auto_update()  # 启动后延迟检查 GitHub 更新并按间隔循环
 
         threading.Thread(target=self.tray.run, daemon=True,
                          name="tray").start()
@@ -2414,10 +2760,40 @@ class DesktopAIPet:
 
 
 # ---------------------------------------------------------------------------
+# Single-instance guard (Windows named mutex)
+# ---------------------------------------------------------------------------
+def ensure_single_instance():
+    """确保同时只有一个桌面AI助理实例在运行。
+
+    借助系统级命名互斥量(Global\\DesktopAIPet_SingleInstance)检测已有实例:
+    若发现已有实例,则尝试把它的桌宠窗口提到前台,并弹出"已在运行"提示框,
+    避免用户误以为"点了没反应";随后退出当前进程,防止多开互相覆盖配置。
+    非 Windows 平台直接放行。
+    """
+    if sys.platform != "win32":
+        return
+    ERROR_ALREADY_EXISTS = 183
+    SW_RESTORE = 9
+    MB_OK = 0
+    handle = ctypes.windll.kernel32.CreateMutexW(
+        None, True, "Global\\DesktopAIPet_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        hwnd = ctypes.windll.user32.FindWindowW(None, "Desktop AIPet")
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, SW_RESTORE)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        ctypes.windll.user32.MessageBoxW(
+            None, "桌面AI助理已在运行。", "提示", MB_OK)
+        os._exit(0)
+    # 句柄保持打开:进程存活期间持续占用,退出后由系统回收
+
+
+# ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    ensure_single_instance()
     try:
         DesktopAIPet().run()
     except Exception:

@@ -25,7 +25,7 @@
 |---|---|
 | 操作系统 | Windows 10/11 |
 | 启动方式 | `pythonw aipet.py` (无控制台) |
-| 开机自启 | 通过 `start.vbs` 拷贝到 Startup 目录实现 |
+| 开机自启 | 注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopAIPet`（与安装包「开机自启」选项共用同一状态，安装勾选则托盘 `[✓]`） |
 | 核心依赖 | `pystray` (托盘), `tkinter` (弹窗, 标准库), `Pillow` (图标绘制), `httpx` (健康探测, 可选, 缺失时回退 `urllib`) |
 | 日志落盘 | `logs/aipet.log` (UTF-8, RotatingFileHandler) |
 
@@ -222,7 +222,8 @@
 `pet_theme`(主题, 内置 `robot`/`labrador`/`bluecat`/`piggy`/`bunny`/`wukong`/`pony` 七种形象, 托盘「🔄 切换助理」循环切换), `pet_visible`(是否显示桌宠), `pet_scale`(缩放, 默认 1.0),
 `pet_x`/`pet_y`(桌宠坐标, 运行时自动保存), `check_interval_s`(健康检测间隔, 默认 30),
 `log_retention_days`(日志保留天数), `auto_restart_on_failure`(失败自启开关),
-`nickname`(助理昵称, 默认空), `boss`(对用户的称呼, 默认 "老板")。
+`nickname`(助理昵称, 默认空), `boss`(对用户的称呼, 默认 "老板"),
+`update_repo`(GitHub 仓库 `owner/repo`, 默认 `zhixinglvren/desktop-aipet`, 用于更新检测与下载), `update_check_hours`(自动检查更新间隔, 默认 6 小时)。
 
 ---
 

@@ -1,0 +1,73 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'          # 仅在打 tag（如 v1.0.1）时构建并发布安装包
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Windows：构建 EXE + 单文件自包含安装程序(desktop-aipet-setup.exe) + 升级用代码包
+  # （本期唯一启用平台；安装程序由 PyInstaller --onefile 生成，无需 WiX/NSIS）
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: pip install pyinstaller pystray pillow httpx
+
+      - name: Build installer (build_installer.bat)
+        run: .\build_installer.bat
+
+      - name: Package update zip (code only; config & runtime preserved)
+        run: |
+          $ver = (Get-Content version.txt).Trim() -replace '^v',''
+          $zip = "desktop-aipet-windows-v$ver.zip"
+          $stage = "update_stage"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          robocopy dist\aipet $stage /E /XF config.json /XD pets icons logs
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip -Force
+          Remove-Item $stage -Recurse -Force
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            desktop-aipet-windows-v*.zip
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # macOS / Linux：本期未实现，仅占位。后续按平台关键词匹配对应 release 资产即可，
+  # 更新检测逻辑（select_update_asset）已为 macos/linux 预留关键词。
+  # ---------------------------------------------------------------------------
+  # macos:
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with: { python-version: '3.12' }
+  #     - run: pip install pyinstaller pystray pillow httpx
+  #     - run: pyinstaller --noconsole --name aipet --hidden-import pystray
+  #              --hidden-import PIL --hidden-import httpx --collect-all pystray
+  #              --collect-all PIL --add-data "version.txt:." --add-data "config.json:."
+  #              aipet.py
+  #     # 用 create-dmg / hdiutil 产出 .dmg，资产名含 "macos" 以便更新匹配
+  #
+  # linux:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with: { python-version: '3.12' }
+  #     - run: pip install pyinstaller pystray pillow httpx
+  #     - run: pyinstaller --noconsole --name aipet ... aipet.py
+  #     # 用 AppImage / deb 产出，资产名含 "linux" 以便更新匹配

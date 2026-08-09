@@ -14,7 +14,7 @@
 - **AI 助理快捷入口**：Claude Code / Codex / OpenCode 一键启动、打开官网、跳转工作空间、查看运行配置与 Agent 配置。
 - **久坐提醒**：按时段定时气泡提醒你起身活动，可一键开启/关闭/测试。
 - **桌宠陪伴**：可拖拽、单击眨眼、双击庆祝并随机说一句台词（带对 ded 你的专属称呼）。
-- **开机自启**：托盘菜单一键开关，自动写入 Startup 目录。
+- **开机自启**：托盘菜单一键开关，与安装包「开机自启」选项共用同一状态（注册表 Run 键）。
 - **热重载**：改完 `config.json` 后点「🌀 重载配置」即时生效，无需重启。
 - **离线可靠**：以应用内对话气泡替代系统通知，适配内网/离线环境。
 
@@ -48,9 +48,48 @@ pip install pystray Pillow httpx
 2. 桌面上会出现一个机器人桌宠，系统托盘（通知区域）也会出现它的图标。
 3. **右键托盘图标**或**右键桌宠**打开完整菜单。
 
-### 开机自启
+## 📦 安装包、更新与开机自启
 
-托盘菜单 → 「📂 更多」→「⚙️ 开机自启」即可；再次点击关闭。开关状态会在菜单标签上以 `[✓]` / `[ ]` 显示。
+### 安装（Windows）
+1. 从 GitHub Releases 下载 `desktop-aipet-setup.exe`（自包含安装程序，无需目标机器装 Python 或任何第三方工具）。
+2. 运行安装程序，可按需选择：
+   - 阅读并勾选 **「我已阅读并同意上述许可协议（MIT）」**——未勾选时「安装」按钮禁用，MIT 声明由此正式生效；
+   - **安装路径**（默认 `%LOCALAPPDATA%\Programs\desktop-aipet`，用户可写目录，无需管理员权限）；
+   - 勾选 **「创建桌面快捷方式」**；
+   - 勾选 **「 Windows 开机自动启动」**；
+   - 勾选 **「安装后启动」**。
+3. 安装完成后双击桌面快捷方式即可启动；卸载可在「设置 → 应用」或控制面板中找到桌面AI助理卸载项，点击后弹出图形化卸载窗口（列出将被移除的项目，并可选择保留个人配置），确认后执行卸载。
+
+### 开机自启（安装选项与托盘开关同步）
+- 安装时勾选「开机自动启动」，或在托盘菜单 →「📂 更多」→「⚙️ 开机自启」开关，**两者共用同一状态**：安装勾选则托盘显示 `[✓]`，关闭则 `[ ]`，互不冲突。
+- 实现方式：写入/移除注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DesktopAIPet`。
+
+### 版本与更新（GitHub Releases）
+- 版本号取自同目录 `version.txt`（如 `1.0.0`）。
+- 在 GitHub Releases 发布新版本（打 `vX.Y.Z` tag 并上传资产）后，程序会：
+  - **自动检测**：启动约 1 分钟后首次检查，之后每 `update_check_hours` 小时一次（默认 6）；
+  - 发现更高版本时弹窗提醒；
+  - 托盘「📂 更多」中出现「⬆️ 升级到 vX.Y.Z」，点击后**下载最新代码包并覆盖本地**（保留你的 `config.json` 与运行时数据 `pets/` `icons/` `logs/`），随后自动重启。
+- 也可随时手动点击「🔄 检查更新」。
+- 更新源与下载资产由 `desktop_aipet.update_repo` 配置（默认 `zhixinglvren/desktop-aipet`）；跨平台资产按 `windows` / `macos` / `linux` 关键词匹配（本期仅实现 Windows）。
+
+### 从源码构建安装包（开发者）
+
+安装程序由纯 Python + PyInstaller 生成，**不依赖 WiX / NSIS 等任何外部打包工具**（你机器上已有的 `pyinstaller` 即可）：
+
+```bash
+# 1) 装好依赖
+pip install pyinstaller pystray pillow httpx
+
+# 2) 一键构建：先 PyInstaller 生成 dist\aipet\aipet.exe（onedir），
+#    再把该 app 作为资源打包进单文件安装程序 dist\desktop-aipet-setup.exe（--onefile）
+build_installer.bat
+# 产物：desktop-aipet-setup.exe（图形化安装向导：安装路径可选、桌面快捷方式、
+#       可选「开机自动启动」、安装后启动、自带卸载项）
+```
+
+> 说明：安装器为免装工具的 `.exe` 自包含安装包（PyInstaller 生成）。若日后需要标准 MSI，需自行安装 WiX Toolset 并用 candle/light 编写，仓库不内置 MSI 构建脚本。
+> 升级用的「代码包」由 GitHub Actions 在打 `vX.Y.Z` tag 时自动生成（见 `.github/workflows/build-release.yml`），客户端「⬆️ 升级」会下载该 zip 覆盖本地代码，但排除 `config.json`/`pets`/`icons`/`logs`，配置与运行时数据不丢。
 
 ---
 
@@ -146,6 +185,8 @@ pip install pystray Pillow httpx
 | `auto_restart_on_failure` | `false` | 失败自启开关（未强制启用） |
 | `nickname` | `""` | 助理昵称；非空时显示「桌面AI助理-昵称」 |
 | `boss` | `"老板"` | 对用户的称呼；台词前自动拼接「{boss}，」 |
+| `update_repo` | `zhixinglvren/desktop-aipet` | GitHub 仓库 `owner/repo`，用于更新检测与下载；此处即本项目的发布地址 |
+| `update_check_hours` | `6` | 自动检查更新的间隔（小时）；启动后约 1 分钟首次检查 |
 
 **示例**：把助理叫「小新」，对你称呼「老板」：
 
