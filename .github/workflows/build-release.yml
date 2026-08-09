@@ -55,9 +55,12 @@ jobs:
           Remove-Item $stage -Recurse -Force
           $sizeMB = [math]::Round((Get-Item $zip).Length / 1MB, 2)
           Write-Host "Created $zip ($fileCount files, ${sizeMB} MB)"
+<<<<<<< HEAD
           # 必须显式清零 $LASTEXITCODE，否则 GitHub Actions 会把脚本结束时的非零值判为步骤失败。
           $global:LASTEXITCODE = 0
           exit 0
+=======
+>>>>>>> dcdc57670645379558e7f566fa976a408ee7654f
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
