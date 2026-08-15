@@ -13,6 +13,7 @@
 - **配置化菜单**：菜单动作、监控目标、路径、AI 助理全部走 `config.json`，零代码扩展。
 - **AI 助理快捷入口**：Claude Code / Codex / OpenCode 一键启动、打开官网、跳转工作空间、查看运行配置与 Agent 配置。
 - **久坐提醒**：按时段定时气泡提醒你起身活动，可一键开启/关闭/测试。
+- **工作进展通知（MCP）**：桌宠作为常驻 MCP Server，接收 Nanobot / WorkBuddy 等工具的任务执行状态与进展，以非阻塞弹窗实时呈现；托盘「🔔 通知设置」可总开关与按来源管理，内置去重与频次控制。
 - **桌宠陪伴**：可拖拽、单击眨眼、双击庆祝并随机说一句台词（带对 ded 你的专属称呼）。
 - **开机自启**：托盘菜单一键开关，与安装包「开机自启」选项共用同一状态（注册表 Run 键）。
 - **热重载**：改完 `config.json` 后点「🌀 重载配置」即时生效，无需重启。
@@ -26,13 +27,13 @@
 |----|------|
 | 操作系统 | Windows 10 / 11 |
 | Python | 3.10+（需 `pythonw` 启动，无控制台） |
-| 依赖 | `pystray`、`Pillow`、`httpx`（可选，缺则回退 `urllib`）；`tkinter` 为标准库 |
+| 依赖 | `pystray`、`Pillow`、`httpx`（可选，缺则回退 `urllib`）；`tkinter` 为标准库；`mcp`（工作进展通知功能所需，缺失则自动降级、其余功能不受影响） |
 | 启动方式 | `pythonw aipet.py` |
 
 ### 安装依赖
 
 ```bash
-pip install pystray Pillow httpx
+pip install pystray Pillow httpx mcp
 ```
 
 ---

@@ -35,7 +35,10 @@ REM Step 1: freeze the application into dist\aipet\aipet.exe.
 REM --specpath dist + --distpath dist => aipet.spec is written under dist\ (build
 REM artifact), NOT in the source tree.
 echo Building application executable...
-"%PY%" -m PyInstaller --noconsole --name aipet --icon "%ROOT%app.ico" --specpath dist --distpath dist --hidden-import pystray --hidden-import PIL --hidden-import httpx --collect-all pystray --collect-all PIL --collect-all httpx --add-data "%ROOT%version.txt;." --add-data "%ROOT%config.json;." --add-data "%ROOT%app.ico;." --add-data "%ROOT%pets;pets" --add-data "%ROOT%LICENSE.rtf;." aipet.py
+REM 1.0.2 起引入 MCP 通知体系：需收集 mcp / uvicorn / starlette / pydantic / sse_starlette / anyio。
+REM notify 包（含 mcp_server）由 aipet.py 静态/惰性导入，PyInstaller 会自动收集；
+REM 若运行环境缺失 mcp，aipet.py 会降级（仅关闭通知服务），不影响其余功能。
+"%PY%" -m PyInstaller --noconsole --name aipet --icon "%ROOT%app.ico" --specpath dist --distpath dist --hidden-import pystray --hidden-import PIL --hidden-import httpx --hidden-import mcp --hidden-import uvicorn --hidden-import starlette --hidden-import pydantic --hidden-import sse_starlette --hidden-import anyio --collect-all pystray --collect-all PIL --collect-all httpx --collect-all mcp --collect-all uvicorn --collect-all starlette --collect-all pydantic --collect-all sse_starlette --collect-all anyio --add-data "%ROOT%version.txt;." --add-data "%ROOT%config.json;." --add-data "%ROOT%app.ico;." --add-data "%ROOT%pets;pets" --add-data "%ROOT%LICENSE.rtf;." aipet.py
 if errorlevel 1 (
   echo [error] Failed to build aipet.exe
   exit /b 1

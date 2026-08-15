@@ -1364,6 +1364,87 @@ class ConfigViewer(tk.Toplevel):
         self.status.config(text="路径已复制")
 
 
+class NotificationSettingsWindow(tk.Toplevel):
+    """通知设置窗口：总开关 + 按来源开关 + 重置去重；低层提供「编辑原始配置」。"""
+
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.title("通知设置")
+        self.geometry("360x340")
+        self.configure(bg=VIEW_BG)
+        self.attributes("-topmost", True)
+        self.after(400, lambda: self.attributes("-topmost", False))
+        self._build()
+
+    def _build(self):
+        bus = self.app.bus
+        f = tk.Frame(self, bg=VIEW_BG)
+        f.pack(fill="both", expand=True, padx=14, pady=12)
+
+        tk.Label(f, text="桌面AI助理 · 工作进展通知", font=("Microsoft YaHei UI", 12, "bold"),
+                 bg=VIEW_BG, fg="#e5e7eb").pack(anchor="w")
+
+        self.master_var = tk.BooleanVar(value=bool(bus.enabled))
+        tk.Checkbutton(f, text="启用工作进展通知", variable=self.master_var,
+                       bg=VIEW_BG, fg="#d1d5db", selectcolor=VIEW_BG,
+                       activebackground=VIEW_BG, activeforeground="#d1d5db",
+                       command=self._apply).pack(anchor="w", pady=(12, 4))
+
+        tk.Label(f, text="按来源开关（关闭后忽略该来源通知）：",
+                 bg=VIEW_BG, fg="#9ca3af", font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+
+        self.source_vars = {}
+        sources = sorted(set(list(bus.source_enabled.keys()) + ["nanobot", "workbuddy"]))
+        for s in sources:
+            if s in ("nanobot", "workbuddy") and s not in bus.source_enabled:
+                bus.set_source_enabled(s, True)
+            v = tk.BooleanVar(value=bus.is_source_enabled(s))
+            self.source_vars[s] = v
+            tk.Checkbutton(f, text=s, variable=v, bg=VIEW_BG, fg="#d1d5db",
+                           selectcolor=VIEW_BG, activebackground=VIEW_BG,
+                           activeforeground="#d1d5db", command=self._apply).pack(anchor="w")
+
+        btns = tk.Frame(f, bg=VIEW_BG)
+        btns.pack(side="bottom", fill="x", pady=(10, 0))
+        _btn(btns, "🔄 重置去重", self._reset)
+        _btn(btns, "📂 高级", self._open_cfg)
+        _btn(btns, "关闭", self.destroy)
+
+    def _apply(self):
+        bus = self.app.bus
+        bus.set_enabled(self.master_var.get())
+        disabled = [s for s, v in self.source_vars.items() if not v.get()]
+        for s, v in self.source_vars.items():
+            bus.set_source_enabled(s, v.get())
+        try:
+            cfg = load_config()
+            da = cfg.setdefault("desktop_aipet", {})
+            if not isinstance(da, dict):
+                da = cfg["desktop_aipet"] = {}
+            notif = da.setdefault("notifications", {})
+            if not isinstance(notif, dict):
+                notif = da["notifications"] = {}
+            notif["enabled"] = bus.enabled
+            notif["disabled_sources"] = disabled
+            save_config(cfg)
+            self.app.notify_cfg = notif
+            self.app.notify_enabled = bus.enabled and self.app.mcp_enabled
+        except Exception:
+            log.exception("保存通知设置失败")
+
+    def _reset(self):
+        if self.app.bus:
+            self.app.bus.tracker.reset()
+        self.app.notify("🔔 已重置通知去重", "", "ok")
+
+    def _open_cfg(self):
+        self.app._singleton_window(
+            "cfg:self",
+            lambda: ConfigViewer(self.app.root, "助理配置（通知）", str(CONFIG_PATH),
+                                 editable=False, on_save=self.app._reload_notify_settings))
+
+
 class LogViewer(tk.Toplevel):
     """实时日志窗口：增量尾随文件，支持自动滚动与关键字过滤。"""
 
@@ -1526,6 +1607,9 @@ class DesktopAIPet:
         self.cfg = load_config()
         self.ap = self.cfg.get("desktop_aipet", {})
         self.menus = self.cfg.get("menus", [])
+
+        # 1.0.2 通知体系初始化（MCP 通知总线 + 配置读取）
+        self._init_notifications()
         # 桌宠昵称：配置 desktop_aipet.nickname，托盘/气泡显示「桌面AI助理-昵称」
         self.nickname = (self.ap.get("nickname") or "").strip()
         # 助理对用户的称呼：配置 desktop_aipet.boss，默认「老板」
@@ -2219,6 +2303,8 @@ class DesktopAIPet:
         more_items = [
             pystray.MenuItem("🩺 健康检测",
                              lambda *a: self.post_ui(self.force_check)),
+            pystray.MenuItem("🔔 通知设置",
+                             lambda *a: self.post_ui(self._open_notify_settings)),
             pystray.MenuItem(startup_label,
                              lambda *a: self.post_ui(self._toggle_startup)),
             pystray.MenuItem("🛠️ 助理配置",
@@ -2611,6 +2697,9 @@ class DesktopAIPet:
         # 重置监控状态，下一轮健康探活将使用最新配置
         self.monitor_states.clear()
 
+        # 1.0.2：同步刷新通知配置（来源开关 / 去重参数 / 总开关）
+        self._init_notifications()
+
         # 重建托盘菜单
         self._refresh_menu()
         if self.tray:
@@ -2641,6 +2730,122 @@ class DesktopAIPet:
             save_config(merged)
         except Exception:
             log.exception("保存配置失败")
+
+    # ------------------------------------------------------------------
+    # 通知体系（1.0.2）：MCP 通知总线 + 常驻 MCP Server
+    # ------------------------------------------------------------------
+    def _init_notifications(self):
+        """读取 notifications 配置，初始化通知总线与来源开关。
+
+        设计原则（见规划 §12）：通知开关并入各来源已有配置，桌宠侧仅持有
+        自身 MCP server 的运行参数（host/port/token）与全局去重/频次参数。
+        任何环节失败都降级为「通知关闭」，不影响桌宠其余功能。
+        """
+        self.notify_cfg = (self.ap.get("notifications") or {}) if isinstance(self.ap, dict) else {}
+        mcp_cfg = (self.notify_cfg.get("mcp") or {}) if isinstance(self.notify_cfg, dict) else {}
+        self.mcp_host = mcp_cfg.get("host") or "127.0.0.1"
+        self.mcp_port = int(mcp_cfg.get("port") or 18791)
+        self.mcp_enabled = bool(mcp_cfg.get("enabled", True))
+        self.notify_token = (mcp_cfg.get("token") or "").strip()
+        self.notify_enabled = bool(self.notify_cfg.get("enabled", True)) and self.mcp_enabled
+
+        try:
+            from notify.bus import NotificationBus
+            from notify.dedup import DedupPolicy
+            max_pm = int(self.notify_cfg.get("max_per_minute", 3))
+            dedup_min = int(self.notify_cfg.get("dedup_minutes", 5))
+            self.bus = NotificationBus(
+                self, enabled=self.notify_enabled,
+                policy=DedupPolicy(max_per_minute=max_pm, dedup_minutes=dedup_min))
+        except Exception:
+            log.exception("通知总线初始化失败，通知功能将不可用")
+            self.bus = None
+
+        if self.bus is not None:
+            disabled = set(self.notify_cfg.get("disabled_sources") or [])
+            # 各来源开关：menus[].notify 决定是否启用；disabled_sources 强制关闭
+            for m in self.menus:
+                nm = (m.get("name") or "").strip().lower()
+                if not nm:
+                    continue
+                if "notify" in m:
+                    self.bus.set_source_enabled(nm, bool(m.get("notify")))
+                if nm in disabled:
+                    self.bus.set_source_enabled(nm, False)
+            self.notify_enabled = self.notify_enabled and (self.bus is not None)
+        else:
+            self.notify_enabled = False
+
+    def _ensure_notify_token(self):
+        """确保通知 Token 存在；首次启动随机生成并持久化回 config.json。"""
+        token = self.notify_token
+        if token:
+            return token
+        import secrets
+        token = secrets.token_hex(16)
+        try:
+            cfg = load_config()
+            da = cfg.setdefault("desktop_aipet", {})
+            if not isinstance(da, dict):
+                da = cfg["desktop_aipet"] = {}
+            notif = da.setdefault("notifications", {})
+            if not isinstance(notif, dict):
+                notif = da["notifications"] = {}
+            mcp = notif.setdefault("mcp", {})
+            if not isinstance(mcp, dict):
+                mcp = notif["mcp"] = {}
+            mcp["enabled"] = mcp.get("enabled", True)
+            mcp["host"] = mcp.get("host", "127.0.0.1")
+            mcp["port"] = mcp.get("port", 18791)
+            mcp["token"] = token
+            notif["enabled"] = notif.get("enabled", True)
+            save_config(cfg)
+            self.notify_token = token
+            self.notify_cfg = notif
+            log.info("已生成并持久化通知 Token")
+        except Exception:
+            log.exception("持久化通知 Token 失败，本次使用内存 Token")
+        return token
+
+    def _start_notification_server(self):
+        """启动通知 MCP Server（独立 daemon 线程）。"""
+        if not getattr(self, "notify_enabled", False) or self.bus is None:
+            return
+        if not self.mcp_enabled:
+            return
+        token = self._ensure_notify_token()
+        if not token:
+            return
+        try:
+            from notify import mcp_server
+        except Exception:
+            log.exception("通知 MCP 模块加载失败（可能缺少 mcp 依赖），通知功能不可用")
+            self.notify("⚠️ 通知服务未启动", "缺少 mcp 依赖，请在 Python 环境安装 mcp", "warn")
+            return
+        mcp_server.set_app(self)
+        host, port = self.mcp_host, self.mcp_port
+        log.info("准备启动通知 MCP Server: %s:%d", host, port)
+        threading.Thread(
+            target=self._run_notify_server,
+            args=(mcp_server, host, port, token),
+            daemon=True, name="notify-mcp").start()
+
+    def _run_notify_server(self, mcp_server, host, port, token):
+        try:
+            mcp_server.serve(host, port, token)
+        except Exception:
+            log.exception("通知 MCP Server 异常退出（端口 %s:%d 可能被占用）", host, port)
+            self.notify("⚠️ 通知服务未启动", f"端口 {port} 可能被占用", "warn")
+
+    def _open_notify_settings(self):
+        """托盘「🔔 通知设置」入口。"""
+        self._singleton_window(
+            "notify:settings",
+            lambda: NotificationSettingsWindow(self))
+
+    def _reload_notify_settings(self):
+        """通知设置窗口保存后，刷新内存态（不重启 MCP Server，仅更新开关）。"""
+        self._init_notifications()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2862,6 +3067,8 @@ class DesktopAIPet:
         self._running = True
 
         self._pump_ui()
+        # 1.0.2：启动通知 MCP Server（独立 daemon 线程；失败仅降级通知功能）
+        self._start_notification_server()
         # 开机后延迟首次健康检测，避免 Nanobot 等外部服务尚未启动好即误报异常
         self.root.after(int(self.health_startup_delay_s * 1000),
                         self.run_health_check)

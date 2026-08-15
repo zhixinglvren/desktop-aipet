@@ -12,7 +12,19 @@
     "boss": "老板",
     "update_repo": "zhixinglvren/desktop-aipet",
     "update_check_hours": 6,
-    "health_startup_delay_s": 60
+    "health_startup_delay_s": 60,
+    "notifications": {
+      "enabled": true,
+      "mcp": {
+        "enabled": true,
+        "host": "127.0.0.1",
+        "port": 18791,
+        "token": ""
+      },
+      "max_per_minute": 3,
+      "dedup_minutes": 5,
+      "disabled_sources": []
+    }
   },
   "menus": [
     {
@@ -50,6 +62,7 @@
       "name": "Nanobot",
       "endpoint": "http://127.0.0.1:18790/health",
       "enabled": true,
+      "notify": true,
       "config_path": "%USERPROFILE%\\.nanobot\\config.json",
       "log_path": "%USERPROFILE%\\.nanobot\\logs\\gateway.log",
       "workspace_key": "agents.defaults.workspace",
