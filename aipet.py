@@ -27,9 +27,37 @@ import zipfile
 import tempfile
 import winreg
 
-import tkinter as tk
-from PIL import Image, ImageDraw, ImageTk
-import pystray
+# ---------------------------------------------------------------------------
+# 依赖自检：第三方模块缺失时给出可读提示。
+# 因为 pythonw 没有控制台窗口，若直接 import 失败会被静默吞掉，表现为“什么都没发生”。
+# 故在入口处先 try import，失败则用 MessageBox 提示正确运行方式后退出。
+# ---------------------------------------------------------------------------
+try:
+    import tkinter as tk
+    from PIL import Image, ImageDraw, ImageTk
+    import pystray
+    # 托盘图标双击召唤：当前版本 pystray 不支持 double_click 参数，且左键单击会弹出模态菜单
+    # 吞掉双击消息。故子类化 win32 实现层，做「左键抬起延时弹菜单 + 双击取消」逻辑。
+    from pystray import _win32 as _pystray_win32
+    from pystray._util import win32 as _pystray_win32_util
+    import httpx
+except ImportError as _imp_err:
+    _mod = getattr(_imp_err, "name", str(_imp_err))
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            None,
+            "桌面AI助理无法启动：缺少依赖模块「%s」。\n\n"
+            "请使用已安装 pystray / PIL / httpx 的 Python 运行本程序，例如：\n"
+            "  D:\\Software\\Python3\\pythonw.exe aipet.py" % _mod,
+            "桌面AI助理 启动失败",
+            0x10,  # MB_ICONERROR
+        )
+    except Exception:
+        pass
+    raise SystemExit(1)
+
+import time as _time
+import threading as _threading
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -1573,6 +1601,8 @@ class DesktopAIPet:
         self.update_repo = get_update_repo(self.cfg)
         self.update_check_hours = float(self.ap.get("update_check_hours", 6))
         self._update_timer = None
+        # 开机后延迟首次健康检测（秒），避免 Nanobot 等外部服务尚未启动即误报异常
+        self.health_startup_delay_s = float(self.ap.get("health_startup_delay_s", 60))
         # 开机自启：与安装器（WiX 写入同一 Run 键）共用状态，天然同步
         self._startup_reg_name = "DesktopAIPet"
 
@@ -1700,7 +1730,7 @@ class DesktopAIPet:
         self.canvas.bind("<Button-1>", self._on_drag_start)
         self.canvas.bind("<B1-Motion>", self._on_drag_move)
         self.canvas.bind("<ButtonRelease-1>", self._on_drag_end)
-        self.canvas.bind("<Button-3>", lambda e: self.play_blink())
+        self.canvas.bind("<Button-3>", self._on_pet_right_click)
         self.canvas.bind("<Double-Button-1>", self._on_pet_double_click)
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
 
@@ -1711,6 +1741,12 @@ class DesktopAIPet:
         self._drag["moved"] = True
         x = self.root.winfo_x() + event.x - self._drag["x"]
         y = self.root.winfo_y() + event.y - self._drag["y"]
+        # 限制在屏幕边界内，避免拖出屏幕后无法找回
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        size = self.root.winfo_width()
+        x = max(0, min(x, sw - size))
+        y = max(0, min(y, sh - size))
         self.root.geometry(f"+{x}+{y}")
 
     def _on_drag_end(self, event):
@@ -1732,6 +1768,19 @@ class DesktopAIPet:
             self.bubble.show(self.assistant_display_name(),
                              self._pick_greeting(),
                              "info", duration=4000)
+
+    def _on_pet_right_click(self, event):
+        # 右键悬浮机器人：弹出菜单，提供「隐藏助理」入口（替代原眨眼）
+        m = tk.Menu(self.root, tearoff=0)
+        m.add_command(label="🙈 隐藏助理", command=self._hide_pet_from_menu)
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _hide_pet_from_menu(self):
+        self.hide_pet()
+        self._refresh_menu()  # 同步托盘菜单标签（召唤助理 ↔ 隐藏助理）
 
     # ------------------------------------------------------------------
     # Animation & state
@@ -2267,9 +2316,77 @@ class DesktopAIPet:
 
     def create_tray_icon(self):
         icon = self.tray_icons.get("normal") or next(iter(self.tray_icons.values()))
-        self.tray = pystray.Icon("desktop-aipet", icon=icon,
-                                 title=self.assistant_display_name(),
-                                 menu=self._build_tray_menu())
+        self.tray = self._TrayIcon("desktop-aipet", icon=icon,
+                              title=self.assistant_display_name(),
+                              menu=self._build_tray_menu(),
+                              on_double_click=self._on_tray_double_click)
+
+    def _on_tray_double_click(self, icon):
+        # 双击托盘图标：召唤（显示）桌面悬浮助理，免去右键菜单操作
+        self.post_ui(self._summon_pet)
+
+
+    class _TrayIcon(_pystray_win32.Icon):
+        """支持双击召唤的托盘图标。
+
+        pystray 当前版本不支持 double_click，且左键单击会弹模态菜单吞掉双击消息。
+        本子类在托盘线程内做：左键抬起后延时 300ms 再弹菜单；若 400ms 内再次出现
+        左键抬起（双击）则取消菜单并触发 on_double_click 回调。
+        """
+        WM_SHOW_MENU = _pystray_win32_util.WM_USER + 20
+        WM_LBUTTONDBLCLK = 0x0203
+        _DBLCLICK_SEC = 0.4
+        _MENU_DELAY = 0.3
+
+        def __init__(self, *args, on_double_click=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._on_double_click = on_double_click
+            self._last_up = -1e9  # 初始化为极小值，避免首击被误判为双击
+            self._menu_timer = None
+            self._message_handlers[self.WM_SHOW_MENU] = self._do_show_menu
+
+        def _do_show_menu(self, wparam, lparam):
+            # 在托盘线程内执行默认菜单弹出（勿跨线程调用 TrackPopupMenuEx）
+            super()._on_notify(0, _pystray_win32_util.WM_LBUTTONUP)
+
+        def _on_notify(self, wparam, lparam):
+            if lparam in (_pystray_win32_util.WM_LBUTTONUP, self.WM_LBUTTONDBLCLK):
+                now = _time.time()
+                if now - self._last_up < self._DBLCLICK_SEC:
+                    # 双击：召唤助理，取消待弹菜单
+                    self._last_up = 0.0
+                    if self._menu_timer is not None:
+                        self._menu_timer.cancel()
+                        self._menu_timer = None
+                    if self._on_double_click:
+                        self._on_double_click(self)
+                    return
+                self._last_up = now
+                # 先不立即弹菜单，观望是否双击
+                if self._menu_timer is not None:
+                    self._menu_timer.cancel()
+                self._menu_timer = _threading.Timer(
+                    self._MENU_DELAY, self._post_show_menu)
+                self._menu_timer.daemon = True
+                self._menu_timer.start()
+                return
+            super()._on_notify(wparam, lparam)
+
+        def _post_show_menu(self):
+            self._menu_timer = None
+            try:
+                _pystray_win32_util.win32.PostMessage(
+                    self._hwnd, self.WM_SHOW_MENU, 0, 0)
+            except Exception:
+                pass
+
+    def _summon_pet(self):
+        if not (self.root and self.root.state() == "normal"):
+            self.show_pet()
+        if self.bubble:
+            self.bubble.show(self.assistant_display_name(),
+                             self._pick_greeting(), "info", duration=4000)
+        self._refresh_menu()
 
     def update_tray_icon(self, state, changed):
         if not self.tray:
@@ -2745,7 +2862,9 @@ class DesktopAIPet:
         self._running = True
 
         self._pump_ui()
-        self.run_health_check()
+        # 开机后延迟首次健康检测，避免 Nanobot 等外部服务尚未启动好即误报异常
+        self.root.after(int(self.health_startup_delay_s * 1000),
+                        self.run_health_check)
         self.start_health_reminder()
         self.start_animation()
         self._start_auto_update()  # 启动后延迟检查 GitHub 更新并按间隔循环

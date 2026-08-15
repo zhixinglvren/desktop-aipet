@@ -11,7 +11,8 @@
     "nickname": "小新",
     "boss": "老板",
     "update_repo": "zhixinglvren/desktop-aipet",
-    "update_check_hours": 6
+    "update_check_hours": 6,
+    "health_startup_delay_s": 60
   },
   "menus": [
     {
