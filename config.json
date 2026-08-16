@@ -3,8 +3,8 @@
     "pet_theme": "robot",
     "pet_visible": true,
     "pet_scale": 1.0,
-    "pet_x": 1368,
-    "pet_y": 677,
+    "pet_x": 1365,
+    "pet_y": 654,
     "check_interval_s": 30,
     "log_retention_days": 7,
     "auto_restart_on_failure": false,
@@ -18,12 +18,18 @@
       "mcp": {
         "enabled": true,
         "host": "127.0.0.1",
-        "port": 18791,
-        "token": ""
+        "port": 18975,
+        "token": "162fba9c1f12914fd5e67d8cf432e5d1"
       },
       "max_per_minute": 3,
       "dedup_minutes": 5,
       "disabled_sources": []
+    },
+    "ui_theme": "light",
+    "sound": {
+      "enabled": true,
+      "selected": 2,
+      "tts_voice": "Microsoft Zira Desktop - English (United States)"
     }
   },
   "menus": [

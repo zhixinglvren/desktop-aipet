@@ -26,6 +26,7 @@ import re
 import zipfile
 import tempfile
 import winreg
+import winsound
 
 # ---------------------------------------------------------------------------
 # 依赖自检：第三方模块缺失时给出可读提示。
@@ -85,7 +86,11 @@ if getattr(sys, "frozen", False):
 else:
     PETS_DIR = BASE_DIR / "pets"
 ICONS_DIR = BASE_DIR / "icons"
+APP_ICON = BASE_DIR / "app.ico"  # 应用图标（机器人），用于弹出框标题栏
 LOGS_DIR = BASE_DIR / "logs"
+SOUNDS_DIR = BASE_DIR / "sounds"  # 7 种提示音 WAV（由 tools/gen_sounds.py 生成）
+SOUND_NAMES = ["和弦", "极光", "脉冲", "圆圈", "鸟鸣", "电报",
+               "晨曦"]  # 与 sounds/0~6.wav 顺序一致
 LOGS_DIR.mkdir(exist_ok=True)
 
 # Win32 process creation flags
@@ -110,6 +115,12 @@ _fh = RotatingFileHandler(LOGS_DIR / "aipet.log", maxBytes=2 * 1024 * 1024,
                           backupCount=3, encoding="utf-8")
 _fh.setFormatter(_fmt)
 log.addHandler(_fh)
+# notify.mcp（MCP 通知服务端）的日志并入同一份 aipet.log，便于统一溯源
+_mcp_log = logging.getLogger("notify.mcp")
+if _fh not in _mcp_log.handlers:
+    _mcp_log.addHandler(_fh)
+_mcp_log.propagate = False
+_mcp_log.setLevel(logging.INFO)
 # 仅在真正拥有 stdout 时才挂控制台 handler（pythonw 下 sys.stdout is None）
 if getattr(sys, "stdout", None) is not None:
     _ch = logging.StreamHandler(sys.stdout)
@@ -1210,21 +1221,95 @@ class PetBubble:
 # Viewer windows
 # ---------------------------------------------------------------------------
 
-VIEW_BG = "#1e1e1e"
-VIEW_FG = "#d4d4d4"
-BAR_BG = "#252526"
+# ---------------------------------------------------------------------------
+# UI 主题：浅色 / 深色 / 跟随系统
+# 查看类窗口（助理配置、各 AI 助理配置/运行配置、运行日志）默认跟随系统背景。
+# ---------------------------------------------------------------------------
+THEME_PALETTES = {
+    "dark": dict(
+        bg="#1e1e1e", fg="#d4d4d4", bar="#252526",
+        entry_bg="#3a3d41", entry_fg="#e5e7eb", insert="#ffffff",
+        btn_bg="#3a3d41", btn_fg="#e5e7eb", btn_active="#4b5057",
+        btn_active_fg="#ffffff", sel="#264f78", status_fg="#9ca3af",
+        check_bg="#252526", check_fg="#e5e7eb",
+    ),
+    "light": dict(
+        bg="#ffffff", fg="#1f2328", bar="#f3f4f6",
+        entry_bg="#ffffff", entry_fg="#1f2328", insert="#000000",
+        btn_bg="#e5e7eb", btn_fg="#1f2328", btn_active="#d1d5db",
+        btn_active_fg="#000000", sel="#b3d4fc", status_fg="#6b7280",
+        check_bg="#f3f4f6", check_fg="#1f2328",
+    ),
+}
+
+_ACTIVE_THEME = "dark"  # 实际生效主题（dark/light），由 set_active_theme 设定
+
+
+def _system_is_dark():
+    """判断 Windows 是否处于深色（应用）模式。无法判定时默认浅色。"""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        val, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return val == 0
+    except Exception:
+        return False
+
+
+def resolve_theme(pref):
+    """把偏好（system/light/dark）解析为实际生效的 light/dark。"""
+    if pref == "light":
+        return "light"
+    if pref == "dark":
+        return "dark"
+    return "dark" if _system_is_dark() else "light"
+
+
+def set_active_theme(pref):
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = resolve_theme(pref)
+
+
+def theme_colors():
+    return THEME_PALETTES[_ACTIVE_THEME]
+
+
+# 打开中的查看窗口注册表：主题切换时统一重新着色
+_OPEN_VIEWERS = []
+
+
+def register_viewer(win):
+    if win not in _OPEN_VIEWERS:
+        _OPEN_VIEWERS.append(win)
+
+
+def unregister_viewer(win):
+    if win in _OPEN_VIEWERS:
+        _OPEN_VIEWERS.remove(win)
+
+
+def apply_theme_to_all():
+    for w in list(_OPEN_VIEWERS):
+        if w.winfo_exists():
+            if hasattr(w, "apply_theme"):
+                w.apply_theme()
+        else:
+            _OPEN_VIEWERS.remove(w)
 
 
 def _make_text_area(parent):
-    frame = tk.Frame(parent, bg=VIEW_BG)
+    C = theme_colors()
+    frame = tk.Frame(parent, bg=C["bg"])
     frame.pack(fill="both", expand=True)
     ysb = tk.Scrollbar(frame, orient="vertical")
     ysb.pack(side="right", fill="y")
     xsb = tk.Scrollbar(frame, orient="horizontal")
     xsb.pack(side="bottom", fill="x")
     text = tk.Text(frame, wrap="none", font=("Consolas", 10),
-                   bg=VIEW_BG, fg=VIEW_FG, insertbackground="#ffffff",
-                   selectbackground="#264f78", relief="flat",
+                   bg=C["bg"], fg=C["fg"], insertbackground=C["insert"],
+                   selectbackground=C["sel"], relief="flat",
                    yscrollcommand=ysb.set, xscrollcommand=xsb.set)
     text.pack(side="left", fill="both", expand=True)
     ysb.config(command=text.yview)
@@ -1233,41 +1318,115 @@ def _make_text_area(parent):
 
 
 def _toolbar(parent):
-    bar = tk.Frame(parent, bg=BAR_BG, pady=6, padx=8)
+    C = theme_colors()
+    bar = tk.Frame(parent, bg=C["bar"], pady=6, padx=8)
     bar.pack(fill="x", side="bottom")
     return bar
 
 
 def _btn(bar, text, cmd, **kw):
-    b = tk.Button(bar, text=text, command=cmd, bg="#3a3d41", fg="#e5e7eb",
-                  activebackground="#4b5057", activeforeground="#ffffff",
+    C = theme_colors()
+    b = tk.Button(bar, text=text, command=cmd, bg=C["btn_bg"], fg=C["btn_fg"],
+                  activebackground=C["btn_active"],
+                  activeforeground=C["btn_active_fg"],
                   relief="flat", padx=12, pady=3,
                   font=("Microsoft YaHei UI", 9), cursor="hand2", **kw)
     b.pack(side="left", padx=(0, 6))
     return b
 
 
+def _center_toplevel(win, w=None, h=None):
+    """将弹出窗口在屏幕中央居中（首次/多次打开均生效，Windows 稳定）。
+
+    关键修正：
+    1) 用「尺寸+位置」组合字符串一次性设置 geometry，且尽量在窗口首次映射前完成，
+       规避 Windows 对「已映射窗口单独改位置」的忽略（表现为首次偏左、二次才居中）。
+    2) 不调用 update_idletasks()，避免它提前触发窗口首次映射、使位置设置失效。
+    3) after 兜底再校正一次（同位置，不会跳动），应对个别 WM 的映射瞬间覆盖。
+    """
+    def _place():
+        nw, nh = w, h
+        if not (nw and nh):
+            m = re.match(r"(\d+)x(\d+)", win.geometry() or "")
+            if m and int(m.group(1)) > 1:
+                nw, nh = int(m.group(1)), int(m.group(2))
+        if not (nw and nh):
+            nw, nh = win.winfo_reqwidth(), win.winfo_reqheight()
+        if not (nw and nh) or nw <= 1 or nh <= 1:
+            return
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        x = max(0, (sw - nw) // 2)
+        y = max(0, (sh - nh) // 2)
+        try:
+            win.geometry(f"{nw}x{nh}+{x}+{y}")
+        except Exception:
+            pass
+
+    _place()                   # 首次映射前一次性设好尺寸+位置，Windows 通常直接生效
+    try:
+        win.after(60, _place)  # 兜底校正（同位置，无跳动）
+    except Exception:
+        pass
+
+
+def _set_window_icon(win):
+    """为弹出窗口标题栏设置机器人小图标（app.ico，缺失时回退到 robot_normal.ico）。"""
+    cands = [APP_ICON]
+    if getattr(sys, "frozen", False):
+        cands.append(RES_DIR / "app.ico")  # 冻结态资源在 _internal
+    cands.append(ICONS_DIR / "robot_normal.ico")
+    for cand in cands:
+        if cand and getattr(cand, "exists", lambda: False)():
+            try:
+                win.iconbitmap(str(cand))
+                return
+            except Exception:
+                pass
+
+
 class ConfigViewer(tk.Toplevel):
-    """文件查看窗口：默认只读，可一键切换为编辑态并保存。"""
+    """文件查看窗口：默认只读，可一键切换为编辑态并保存。支持关键字过滤。"""
 
     def __init__(self, master, title, filepath, pretty_json=True,
                  editable=False, on_save=None):
         super().__init__(master)
+        C = theme_colors()
         self.filepath = filepath
         self.pretty = pretty_json
         self._editing = False
         self.on_save = on_save
+        self._full_content = ""
+        self.filter_var = tk.StringVar()
         self.title(f"{title} — {filepath}")
-        self.geometry("900x640")
-        self.configure(bg=VIEW_BG)
+        _center_toplevel(self, 900, 640)
+        self.configure(bg=C["bg"])
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        _set_window_icon(self)
+
+        # 顶部过滤栏（关键字过滤，逻辑同运行日志查看器）
+        self._top = tk.Frame(self, bg=C["bar"], pady=6, padx=8)
+        self._top.pack(fill="x", side="top")
+        self._filter_label = tk.Label(self._top, text="过滤:", bg=C["bar"],
+                                      fg=C["status_fg"],
+                                      font=("Microsoft YaHei UI", 9))
+        self._filter_label.pack(side="left")
+        self.filter_entry = tk.Entry(self._top, textvariable=self.filter_var,
+                                     bg=C["entry_bg"], fg=C["entry_fg"],
+                                     insertbackground=C["insert"], relief="flat",
+                                     font=("Consolas", 10), width=28)
+        self.filter_entry.pack(side="left", padx=6)
+        self.filter_entry.bind("<Return>", lambda e: self._render())
+        self.filter_entry.bind("<KeyRelease>", lambda e: self._render())
 
         self.text = _make_text_area(self)
         self.bar = _toolbar(self)
         self.reload()
         if editable:
             self._enter_edit()
+        register_viewer(self)
 
     def _build_toolbar(self):
         for w in list(self.bar.winfo_children()):
@@ -1280,16 +1439,31 @@ class ConfigViewer(tk.Toplevel):
             _btn(self.bar, "✏️ 编辑", self._enter_edit)
         _btn(self.bar, "📂 打开", self.open_external)
         _btn(self.bar, "📋 复制路径", self.copy_path)
-        _btn(self.bar, "关闭", self.destroy)
-        self.status = tk.Label(self.bar, text="", bg=BAR_BG, fg="#9ca3af",
+        _btn(self.bar, "关闭", self._on_close)
+        C = theme_colors()
+        self.status = tk.Label(self.bar, text="", bg=C["bar"], fg=C["status_fg"],
                                font=("Microsoft YaHei UI", 9))
         self.status.pack(side="right")
+
+    def _render(self):
+        """按关键字过滤渲染 _full_content。编辑态下不过滤、显示全文。"""
+        self.text.config(state="normal")
+        self.text.delete("1.0", "end")
+        content = self._full_content
+        if not self._editing:
+            flt = self.filter_var.get().strip().lower()
+            lines = [ln for ln in content.splitlines()
+                     if flt in ln.lower()] if flt else content.splitlines()
+        else:
+            lines = content.splitlines()
+        self.text.insert("1.0", "\n".join(lines))
 
     def reload(self):
         self.text.config(state="normal")
         self.text.delete("1.0", "end")
         if not self.filepath or not os.path.exists(self.filepath):
-            self.text.insert("1.0", f"[文件不存在]\n{self.filepath}")
+            self._full_content = "[文件不存在]\n" + str(self.filepath)
+            self._render()
             self._build_toolbar()
             self.status.config(text="文件不存在")
             self.text.config(state="normal" if self._editing else "disabled")
@@ -1304,7 +1478,8 @@ class ConfigViewer(tk.Toplevel):
                                          ensure_ascii=False, indent=2)
                 except Exception:
                     pass
-            self.text.insert("1.0", content)
+            self._full_content = content
+            self._render()
             size = os.path.getsize(self.filepath)
             mtime = datetime.fromtimestamp(os.path.getmtime(self.filepath))
             self._build_toolbar()
@@ -1312,19 +1487,24 @@ class ConfigViewer(tk.Toplevel):
                 text=f"{size:,} 字节 · 修改于 {mtime:%Y-%m-%d %H:%M:%S}"
                      + (" · 只读" if not self._editing else " · 编辑中"))
         except Exception as e:
+            self._full_content = f"[读取失败] {e}"
+            self._render()
             self._build_toolbar()
-            self.text.insert("1.0", f"[读取失败] {e}")
             self.status.config(text="读取失败")
         self.text.config(state="normal" if self._editing else "disabled")
 
     def _enter_edit(self):
         self._editing = True
+        self.filter_var.set("")              # 编辑时清空过滤、显示全文
+        self.filter_entry.config(state="disabled")
+        self._render()
         self.text.config(state="normal")
         self._build_toolbar()
         self.status.config(text="编辑模式 · 修改后点「保存」")
 
     def _cancel_edit(self):
         self._editing = False
+        self.filter_entry.config(state="normal")
         self.reload()
 
     def _save(self):
@@ -1343,6 +1523,7 @@ class ConfigViewer(tk.Toplevel):
             with open(self.filepath, "w", encoding="utf-8") as f:
                 f.write(content)
             self._editing = False
+            self.filter_entry.config(state="normal")
             self.text.config(state="disabled")
             self._build_toolbar()
             self.status.config(text="已保存 ✓")
@@ -1354,6 +1535,22 @@ class ConfigViewer(tk.Toplevel):
             log.exception("保存配置失败")
             self.status.config(text=f"保存失败: {e}")
 
+    def _on_close(self):
+        unregister_viewer(self)
+        self.destroy()
+
+    def apply_theme(self):
+        C = theme_colors()
+        self.configure(bg=C["bg"])
+        self._top.configure(bg=C["bar"])
+        self.bar.configure(bg=C["bar"])
+        self._filter_label.configure(bg=C["bar"], fg=C["status_fg"])
+        self.filter_entry.configure(bg=C["entry_bg"], fg=C["entry_fg"],
+                                    insertbackground=C["insert"])
+        self.text.configure(bg=C["bg"], fg=C["fg"], insertbackground=C["insert"],
+                            selectbackground=C["sel"])
+        self._build_toolbar()  # 按钮由 _btn 自动取主题色
+
     def open_external(self):
         if self.filepath and os.path.exists(self.filepath):
             os.startfile(self.filepath)
@@ -1362,87 +1559,6 @@ class ConfigViewer(tk.Toplevel):
         self.clipboard_clear()
         self.clipboard_append(self.filepath)
         self.status.config(text="路径已复制")
-
-
-class NotificationSettingsWindow(tk.Toplevel):
-    """通知设置窗口：总开关 + 按来源开关 + 重置去重；低层提供「编辑原始配置」。"""
-
-    def __init__(self, app):
-        super().__init__(app.root)
-        self.app = app
-        self.title("通知设置")
-        self.geometry("360x340")
-        self.configure(bg=VIEW_BG)
-        self.attributes("-topmost", True)
-        self.after(400, lambda: self.attributes("-topmost", False))
-        self._build()
-
-    def _build(self):
-        bus = self.app.bus
-        f = tk.Frame(self, bg=VIEW_BG)
-        f.pack(fill="both", expand=True, padx=14, pady=12)
-
-        tk.Label(f, text="桌面AI助理 · 工作进展通知", font=("Microsoft YaHei UI", 12, "bold"),
-                 bg=VIEW_BG, fg="#e5e7eb").pack(anchor="w")
-
-        self.master_var = tk.BooleanVar(value=bool(bus.enabled))
-        tk.Checkbutton(f, text="启用工作进展通知", variable=self.master_var,
-                       bg=VIEW_BG, fg="#d1d5db", selectcolor=VIEW_BG,
-                       activebackground=VIEW_BG, activeforeground="#d1d5db",
-                       command=self._apply).pack(anchor="w", pady=(12, 4))
-
-        tk.Label(f, text="按来源开关（关闭后忽略该来源通知）：",
-                 bg=VIEW_BG, fg="#9ca3af", font=("Microsoft YaHei UI", 9)).pack(anchor="w")
-
-        self.source_vars = {}
-        sources = sorted(set(list(bus.source_enabled.keys()) + ["nanobot", "workbuddy"]))
-        for s in sources:
-            if s in ("nanobot", "workbuddy") and s not in bus.source_enabled:
-                bus.set_source_enabled(s, True)
-            v = tk.BooleanVar(value=bus.is_source_enabled(s))
-            self.source_vars[s] = v
-            tk.Checkbutton(f, text=s, variable=v, bg=VIEW_BG, fg="#d1d5db",
-                           selectcolor=VIEW_BG, activebackground=VIEW_BG,
-                           activeforeground="#d1d5db", command=self._apply).pack(anchor="w")
-
-        btns = tk.Frame(f, bg=VIEW_BG)
-        btns.pack(side="bottom", fill="x", pady=(10, 0))
-        _btn(btns, "🔄 重置去重", self._reset)
-        _btn(btns, "📂 高级", self._open_cfg)
-        _btn(btns, "关闭", self.destroy)
-
-    def _apply(self):
-        bus = self.app.bus
-        bus.set_enabled(self.master_var.get())
-        disabled = [s for s, v in self.source_vars.items() if not v.get()]
-        for s, v in self.source_vars.items():
-            bus.set_source_enabled(s, v.get())
-        try:
-            cfg = load_config()
-            da = cfg.setdefault("desktop_aipet", {})
-            if not isinstance(da, dict):
-                da = cfg["desktop_aipet"] = {}
-            notif = da.setdefault("notifications", {})
-            if not isinstance(notif, dict):
-                notif = da["notifications"] = {}
-            notif["enabled"] = bus.enabled
-            notif["disabled_sources"] = disabled
-            save_config(cfg)
-            self.app.notify_cfg = notif
-            self.app.notify_enabled = bus.enabled and self.app.mcp_enabled
-        except Exception:
-            log.exception("保存通知设置失败")
-
-    def _reset(self):
-        if self.app.bus:
-            self.app.bus.tracker.reset()
-        self.app.notify("🔔 已重置通知去重", "", "ok")
-
-    def _open_cfg(self):
-        self.app._singleton_window(
-            "cfg:self",
-            lambda: ConfigViewer(self.app.root, "助理配置（通知）", str(CONFIG_PATH),
-                                 editable=False, on_save=self.app._reload_notify_settings))
 
 
 class LogViewer(tk.Toplevel):
@@ -1461,28 +1577,35 @@ class LogViewer(tk.Toplevel):
         self._filter = ""
 
         self.title(f"{title} — {filepath}")
-        self.geometry("1000x660")
-        self.configure(bg=VIEW_BG)
+        _center_toplevel(self, 1000, 660)
+        self.configure(bg=theme_colors()["bg"])
         self.attributes("-topmost", True)
         self.after(400, lambda: self.attributes("-topmost", False))
         self.protocol("WM_DELETE_WINDOW", self._close)
+        _set_window_icon(self)
 
-        top = tk.Frame(self, bg=BAR_BG, pady=6, padx=8)
-        top.pack(fill="x", side="top")
-        tk.Label(top, text="过滤:", bg=BAR_BG, fg="#9ca3af",
-                 font=("Microsoft YaHei UI", 9)).pack(side="left")
+        C = theme_colors()
+        self._top = tk.Frame(self, bg=C["bar"], pady=6, padx=8)
+        self._top.pack(fill="x", side="top")
+        self._filter_label = tk.Label(self._top, text="过滤:", bg=C["bar"],
+                                     fg=C["status_fg"],
+                                     font=("Microsoft YaHei UI", 9))
+        self._filter_label.pack(side="left")
         self.filter_var = tk.StringVar()
-        ent = tk.Entry(top, textvariable=self.filter_var, bg="#3a3d41",
-                       fg="#e5e7eb", insertbackground="#ffffff", relief="flat",
-                       font=("Consolas", 10), width=28)
-        ent.pack(side="left", padx=6)
-        ent.bind("<Return>", lambda e: self._reload_all())
+        self.filter_entry = tk.Entry(self._top, textvariable=self.filter_var,
+                                    bg=C["entry_bg"], fg=C["entry_fg"],
+                                    insertbackground=C["insert"], relief="flat",
+                                    font=("Consolas", 10), width=28)
+        self.filter_entry.pack(side="left", padx=6)
+        self.filter_entry.bind("<Return>", lambda e: self._reload_all())
         self.autoscroll = tk.BooleanVar(value=True)
-        tk.Checkbutton(top, text="自动滚动", variable=self.autoscroll,
-                       bg=BAR_BG, fg="#e5e7eb", selectcolor=BAR_BG,
-                       activebackground=BAR_BG, activeforeground="#ffffff",
-                       font=("Microsoft YaHei UI", 9)).pack(side="left", padx=8)
-        self.status = tk.Label(top, text="", bg=BAR_BG, fg="#9ca3af",
+        self.autoscroll_cb = tk.Checkbutton(
+            self._top, text="自动滚动", variable=self.autoscroll,
+            bg=C["check_bg"], fg=C["check_fg"], selectcolor=C["check_bg"],
+            activebackground=C["check_bg"], activeforeground=C["check_fg"],
+            font=("Microsoft YaHei UI", 9))
+        self.autoscroll_cb.pack(side="left", padx=8)
+        self.status = tk.Label(self._top, text="", bg=C["bar"], fg=C["status_fg"],
                                font=("Microsoft YaHei UI", 9))
         self.status.pack(side="right")
 
@@ -1492,14 +1615,15 @@ class LogViewer(tk.Toplevel):
         self.text.tag_config("ok", foreground="#4ade80")
         self.text.tag_config("hint", foreground="#60a5fa")
 
-        bar = _toolbar(self)
-        _btn(bar, "🔄 重新载入", self._reload_all)
-        _btn(bar, "🧹 清空显示", self._clear_view)
-        _btn(bar, "📂 打开日志文件", self._open_external)
-        _btn(bar, "关闭", self._close)
+        self.bar = _toolbar(self)
+        _btn(self.bar, "🔄 重新载入", self._reload_all)
+        _btn(self.bar, "🧹 清空显示", self._clear_view)
+        _btn(self.bar, "📂 打开日志文件", self._open_external)
+        _btn(self.bar, "关闭", self._close)
 
         self._reload_all()
         self._tick()
+        register_viewer(self)
 
     # -- rendering ---------------------------------------------------
     def _tag_for(self, line):
@@ -1595,7 +1719,30 @@ class LogViewer(tk.Toplevel):
 
     def _close(self):
         self._alive = False
+        unregister_viewer(self)
         self.destroy()
+
+    def apply_theme(self):
+        C = theme_colors()
+        self.configure(bg=C["bg"])
+        self._top.configure(bg=C["bar"])
+        self._filter_label.configure(bg=C["bar"], fg=C["status_fg"])
+        self.filter_entry.configure(bg=C["entry_bg"], fg=C["entry_fg"],
+                                    insertbackground=C["insert"])
+        self.autoscroll_cb.configure(bg=C["check_bg"], fg=C["check_fg"],
+                                     selectcolor=C["check_bg"],
+                                     activebackground=C["check_bg"],
+                                     activeforeground=C["check_fg"])
+        self.status.configure(bg=C["bar"], fg=C["status_fg"])
+        self.text.configure(bg=C["bg"], fg=C["fg"], insertbackground=C["insert"],
+                            selectbackground=C["sel"])
+        # 重新着色底部工具栏（框架 + 按钮）；LogViewer 工具栏为内联构建，此处逐项重设
+        self.bar.configure(bg=C["bar"])
+        for w in self.bar.winfo_children():
+            if isinstance(w, tk.Button):
+                w.configure(bg=C["btn_bg"], fg=C["btn_fg"],
+                            activebackground=C["btn_active"],
+                            activeforeground=C["btn_active_fg"])
 
 
 # ---------------------------------------------------------------------------
@@ -1607,6 +1754,9 @@ class DesktopAIPet:
         self.cfg = load_config()
         self.ap = self.cfg.get("desktop_aipet", {})
         self.menus = self.cfg.get("menus", [])
+
+        # UI 主题：默认「跟随系统」，查看类窗口据此着色
+        set_active_theme(self.ap.get("ui_theme", "system"))
 
         # 1.0.2 通知体系初始化（MCP 通知总线 + 配置读取）
         self._init_notifications()
@@ -1714,10 +1864,145 @@ class DesktopAIPet:
         if self.root:
             self.root.after(50, self._pump_ui)
 
-    def notify(self, title, message="", level="info"):
+    def notify(self, title, message="", level="info", play_sound=False):
         log.info("[通知] %s | %s", title, message)
         if self.bubble:
             self.post_ui(lambda: self.bubble.show(title, message, level))
+        # 仅工作通知（经 notify 总线推送的外部消息）播放提示音；
+        # 切换助理 / 主题 / 菜单操作等 UI 反馈不响，问候语走 _greet（TTS）也不响。
+        if play_sound:
+            self._play_notification_sound()
+
+    # ------------------------------------------------------------------
+    # 提示音 / 语音
+    # ------------------------------------------------------------------
+    def _sound_enabled(self):
+        """全局静音开关：同时控制提示音与问候语 TTS。"""
+        return bool(self.ap.get("sound", {}).get("enabled", True))
+
+    def _selected_sound_path(self):
+        idx = int(self.ap.get("sound", {}).get("selected", 0) or 0)
+        if idx < 0 or idx >= len(SOUND_NAMES):
+            idx = 0
+        return SOUNDS_DIR / "{}.wav".format(idx)
+
+    def _play_notification_sound(self, preview=False):
+        """播放当前选中的提示音（异步，不阻塞 UI）。
+
+        preview=True 时仅试听、不弹气泡（用于声音设置里选声预览）。
+        """
+        if not self._sound_enabled():
+            return
+        path = self._selected_sound_path()
+        if not path.exists():
+            log.warning("提示音文件不存在：%s", path)
+            return
+        try:
+            winsound.PlaySound(str(path),
+                               winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception as e:
+            log.warning("播放提示音失败：%s", e)
+
+    def _speak(self, text):
+        """用 Windows SAPI 把文字朗读出来（交互问候语）。离线、无需联网。
+
+        环境缺 pywin32 / SAPI 时优雅降级：仅记日志，不发声。
+
+        关键修复：原实现用 ``voice.Speak(text, 1)`` 异步朗读，而 ``voice`` 是局部变量，
+        函数返回后 Python 立即回收该 SpVoice 对象，SAPI 语音流被提前拆除，表现为
+        “只弹气泡、听不到声音”。现改为在独立 STA 线程内**同步** Speak（阻塞该线程、
+        不阻塞 UI 主线程），保证朗读期间 COM 对象存活、语音完整播放，且不冻结桌宠界面。
+        """
+        if not text:
+            return
+        try:
+            import threading
+
+            def _run():
+                try:
+                    import pythoncom
+                    import win32com.client
+                    pythoncom.CoInitialize()  # 该线程以 STA 初始化 COM
+                    voice = win32com.client.Dispatch("SAPI.SpVoice")
+                    # 默认「18 岁小萝莉向」——自动挑最年轻甜美的中文女声（优先微软
+                    # 神经语音 Xiaoxiao/晓晓、Xiaoyi/晓伊，其次瑶瑶/婷/娜等年轻女声，
+                    # 男声降权），保证默认就是可爱萝莉音而非成年播音员腔。
+                    # 不读取任何手动指定语音（该菜单入口已移除），彻底避免错选英文
+                    # 语音导致中文问候不发声的问题。
+                    try:
+                        vs = voice.GetVoices()
+                        chosen = self._pick_best_voice(vs)
+                        if chosen is not None:
+                            voice.Voice = chosen
+                            log.info("TTS 播报使用语音：%s", chosen.GetDescription())
+                    except Exception:
+                        pass
+                    # 满音量；语速取配置（默认 0 = 自然语速，不强制放慢）
+                    try:
+                        voice.Volume = 100
+                        voice.Rate = int(self.ap.get("sound", {}).get("tts_rate", 0) or 0)
+                    except Exception:
+                        pass
+                    # 同步朗读：阻塞直到念完；对象在本线程存活期内一直有效
+                    voice.Speak(text)
+                except Exception as e:
+                    log.warning("TTS 语音不可用（需 pywin32 / SAPI）：%s", e)
+                finally:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_run, daemon=True).start()
+        except Exception as e:
+            log.warning("TTS 启动线程失败：%s", e)
+
+    def _pick_best_voice(self, vs):
+        """按「18 岁小萝莉」偏好给本机语音打分，返回最佳者（无则 None）。
+
+        评分：神经/在线语音（更自然甜美）最高；年轻女声关键词（晓晓/晓伊/瑶/婷/娜/丽…）
+        次之；中文语音保底；男声（康康等）大幅降权。自动默认即选此最高分语音。
+        """
+        def score(desc):
+            d = (desc or "").lower()
+            s = 0
+            if "neural" in d or "online" in d or "natural" in d:
+                s += 100
+            table = (("xiaoxiao", 60), ("晓晓", 60), ("xiaoyi", 55), ("晓伊", 55),
+                     ("yao", 50), ("瑶", 50), ("丫", 50),
+                     ("ting", 40), ("婷", 40), ("na", 35), ("娜", 35),
+                     ("li", 30), ("丽", 30), ("ya", 25), ("雅", 25),
+                     ("yun", 20), ("云", 20), ("yue", 15), ("悦", 15),
+                     ("hui", 10), ("慧", 10))
+            for kw, w in table:
+                if kw in d:
+                    s += w
+            if "chinese" in d or "中文" in d:
+                s += 5
+            if "male" in d or "kang" in d or "康" in d:
+                s -= 50
+            return s
+
+        best, best_s = None, -10 ** 9
+        try:
+            for i in range(vs.Count):
+                desc = vs.Item(i).GetDescription()
+                sc = score(desc)
+                if sc > best_s:
+                    best_s, best = sc, vs.Item(i)
+        except Exception:
+            pass
+        return best
+
+    def _greet(self, text):
+        """交互问候语：弹气泡 + 语音朗读。"""
+        try:
+            if self.bubble:
+                self.bubble.show(self.assistant_display_name(), text,
+                                 "info", duration=4000)
+        except Exception:
+            log.exception("问候气泡展示失败")
+        self._speak(text)
 
     # ------------------------------------------------------------------
     # Setup
@@ -1846,12 +2131,9 @@ class DesktopAIPet:
 
     def _on_pet_double_click(self, event):
         self._last_click_t = time.time()
-        # 双击：播放开心跳跃 + 跑动 + 弯眼互动动画，并随机展示一句台词
+        # 双击：播放开心跳跃 + 跑动 + 弯眼互动动画，并随机展示一句台词（含语音朗读）
         self.play_double_click_anim()
-        if self.bubble:
-            self.bubble.show(self.assistant_display_name(),
-                             self._pick_greeting(),
-                             "info", duration=4000)
+        self._greet(self._pick_greeting())
 
     def _on_pet_right_click(self, event):
         # 右键悬浮机器人：弹出菜单，提供「隐藏助理」入口（替代原眨眼）
@@ -1965,17 +2247,26 @@ class DesktopAIPet:
         text = random.choice(self.greetings)
         return f"{self.boss}，{text}"
 
+    def _startup_greeting(self):
+        """启动问候：桌宠处于显示状态时，从 greetings 随机挑一句问候语（气泡 + 语音）。"""
+        try:
+            if not (self.root and self.root.state() == "normal"):
+                return
+            if not self.bubble:
+                return
+            self._greet(self._pick_greeting())
+        except Exception:
+            log.exception("启动问候失败")
+
     def toggle_pet(self):
         if self.root and self.root.state() == "normal":
             self.hide_pet()
         else:
             self.show_pet()
             # 召唤助理点击 → 显示桌宠时，从 config.json 的 "greetings"
-            # 随机选一句台词，在桌宠对话框（气泡）中展示。
+            # 随机选一句台词，在桌宠对话框（气泡）中展示并语音朗读。
             if self.root and self.bubble:
-                self.bubble.show(self.assistant_display_name(),
-                                 self._pick_greeting(),
-                                 "info", duration=4000)
+                self._greet(self._pick_greeting())
         self._refresh_menu()  # 更新菜单标签（召唤助理 ↔ 隐藏助理）
 
     def _rebuild_pet_tk_frames(self):
@@ -2207,18 +2498,35 @@ class DesktopAIPet:
     # Menus
     # ------------------------------------------------------------------
 
-    def _overall_summary(self):
-        # 仅统计带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与健康聚合
+    def _builtin_monitors(self):
+        """内置健康监控项：不显示为独立菜单，但纳入健康检测与汇总。
 
+        目前含「助理MCP」——即桌宠自身 MCP 通知服务，端口来自
+        desktop_aipet.notifications.mcp。仅当通知服务启用时纳入检测。
+        """
+        if not self.cfg.get("desktop_aipet", {}).get("notifications", {}).get("enabled", True):
+            return []
+        mcp = self.cfg.get("desktop_aipet", {}).get("notifications", {}).get("mcp", {})
+        host = mcp.get("host", "127.0.0.1")
+        port = mcp.get("port", 18975)
+        return [{
+            "name": "助理MCP",
+            "endpoint": "http://{}:{}/health".format(host, port),
+            "enabled": True,
+        }]
+
+    def _overall_summary(self):
+        # 仅统计带 endpoint 的监控项（含内置「助理MCP」）；
+        # 无 endpoint 的纯菜单组（如 AI 助理）不参与健康聚合
         enabled = [m for m in self.menus
                    if m.get("enabled", True) and m.get("endpoint")]
+        enabled += self._builtin_monitors()
         if not enabled:
             return "无启用的监控项"
-        bad = [m["name"] for m in enabled
-               if not self.monitor_states.get(m["name"], (True, ""))[0]]
-        if not bad:
-            return f"全部正常 ({len(enabled)})"
-        return "异常: " + "、".join(bad)
+        parts = ["{}({})".format(m["name"],
+                                 "OK" if self.monitor_states.get(m["name"], (True, ""))[0] else "Error")
+                 for m in enabled]
+        return "、".join(parts)
 
     def _monitor_status(self, name):
         ok, detail = self.monitor_states.get(name, (True, "等待检测"))
@@ -2228,6 +2536,76 @@ class DesktopAIPet:
         """托盘/气泡中显示的名称：桌面AI助理[-昵称]。"""
         base = "桌面AI助理"
         return f"{base}-{self.nickname}" if self.nickname else base
+
+    # -- UI 主题设置 --------------------------------------------------
+    def _theme_submenu(self):
+        """「更多 → 🎨 主题设置」子菜单：跟随系统 / 浅色 / 深色（单选）。"""
+        def checked(pref):
+            return lambda item: self.ap.get("ui_theme", "system") == pref
+        return pystray.Menu(
+            pystray.MenuItem("🌗 跟随系统",
+                             lambda *a: self.post_ui(
+                                 lambda: self._set_ui_theme("system")),
+                             checked=checked("system"), radio=True),
+            pystray.MenuItem("☀️ 浅色模式",
+                             lambda *a: self.post_ui(
+                                 lambda: self._set_ui_theme("light")),
+                             checked=checked("light"), radio=True),
+            pystray.MenuItem("🌙 深色模式",
+                             lambda *a: self.post_ui(
+                                 lambda: self._set_ui_theme("dark")),
+                             checked=checked("dark"), radio=True),
+        )
+
+    def _set_ui_theme(self, pref):
+        """切换 UI 主题并持久化；已打开的查看窗口实时重新着色。"""
+        self.ap["ui_theme"] = pref
+        self._save_config()
+        set_active_theme(pref)
+        apply_theme_to_all()
+        self.notify("🎨 主题已切换",
+                    {"system": "跟随系统", "light": "浅色模式",
+                     "dark": "深色模式"}.get(pref, pref), "info")
+        self._refresh_menu()
+
+    def _sound_submenu(self):
+        """「更多 → 🔊 声音设置」子菜单：关闭提示音（置顶）/ 7 种提示音（单选）。"""
+        items = [
+            pystray.MenuItem(
+                "🔔 开启提示音",
+                lambda *a: self.post_ui(lambda: self._set_sound_enabled(True)),
+                checked=lambda item: self._sound_enabled(), radio=True),
+            pystray.MenuItem(
+                "🔕 关闭提示音",
+                lambda *a: self.post_ui(lambda: self._set_sound_enabled(False)),
+                checked=lambda item: not self._sound_enabled(), radio=True),
+            pystray.Menu.SEPARATOR,
+        ]
+        for i, name in enumerate(SOUND_NAMES):
+            items.append(pystray.MenuItem(
+                "{} {}".format(i + 1, name),
+                lambda *a, idx=i: self.post_ui(
+                    lambda: self._set_sound_selected(idx)),
+                checked=lambda item, idx=i: int(
+                    self.ap.get("sound", {}).get("selected", 0) or 0) == idx,
+                radio=True))
+        return pystray.Menu(*items)
+
+    def _set_sound_enabled(self, on):
+        """开启/关闭全局提示音（含问候语 TTS）。"""
+        self.ap.setdefault("sound", {})["enabled"] = bool(on)
+        self._save_config()
+        self._refresh_menu()
+        if on:  # 开启时试听一下当前选中的提示音，给即时反馈
+            self._play_notification_sound(preview=True)
+
+    def _set_sound_selected(self, idx):
+        """选定某提示音：置为启用并立即试听（选声即试听）。"""
+        self.ap.setdefault("sound", {})["selected"] = idx
+        self.ap.setdefault("sound", {})["enabled"] = True
+        self._save_config()
+        self._refresh_menu()
+        self._play_notification_sound(preview=True)
 
     def _build_tray_menu(self):
         # 顶层：聚合健康状态圆圈（🟢正常 / 🟡告警 / 🔴异常），仅作状态指示
@@ -2301,12 +2679,12 @@ class DesktopAIPet:
         startup_label = "⚙️ 开机自启 [{}]".format("✓" if startup_on else " ")
 
         more_items = [
-            pystray.MenuItem("🩺 健康检测",
-                             lambda *a: self.post_ui(self.force_check)),
-            pystray.MenuItem("🔔 通知设置",
-                             lambda *a: self.post_ui(self._open_notify_settings)),
+            pystray.MenuItem("🎨 主题设置", self._theme_submenu()),
+            pystray.MenuItem("🔊 声音设置", self._sound_submenu()),
             pystray.MenuItem(startup_label,
                              lambda *a: self.post_ui(self._toggle_startup)),
+            pystray.MenuItem("🩺 健康检测",
+                             lambda *a: self.post_ui(self.force_check)),
             pystray.MenuItem("🛠️ 助理配置",
                              lambda *a: self.post_ui(
                                  lambda: self._singleton_window(
@@ -2317,8 +2695,15 @@ class DesktopAIPet:
                                          on_save=self._reload_config)))),
             pystray.MenuItem("🌀 重载配置",
                              lambda *a: self.post_ui(self._reload_config)),
+            pystray.MenuItem("📜 运行日志",
+                             lambda *a: self.post_ui(
+                                 lambda: self._singleton_window(
+                                     "log:self",
+                                     lambda: LogViewer(
+                                         self.root, "桌宠运行日志",
+                                         str(LOGS_DIR / "aipet.log"))))),
         ]
-        # 更新：有可用新版本时额外显示升级项
+        # 更新：有可用新版本时额外显示升级项（位于检查更新位置）
         if getattr(self, "_pending_update", None):
             more_items.append(
                 pystray.MenuItem(
@@ -2469,9 +2854,8 @@ class DesktopAIPet:
     def _summon_pet(self):
         if not (self.root and self.root.state() == "normal"):
             self.show_pet()
-        if self.bubble:
-            self.bubble.show(self.assistant_display_name(),
-                             self._pick_greeting(), "info", duration=4000)
+        # 召唤助理：随机展示一句问候语（含语音朗读）
+        self._greet(self._pick_greeting())
         self._refresh_menu()
 
     def update_tray_icon(self, state, changed):
@@ -2511,10 +2895,11 @@ class DesktopAIPet:
     def run_health_check(self):
         if not self._running:
             return
-        # 仅探测带 endpoint 的监控项；无 endpoint 的纯菜单组（如 AI 助理）不参与探活
+        # 探测带 endpoint 的菜单监控项，并纳入内置监控项（如助理MCP）
 
         enabled = [m for m in self.menus
                    if m.get("enabled", True) and m.get("endpoint")]
+        enabled += self._builtin_monitors()
         if not enabled:
             self._schedule_next_check()
             return
@@ -2607,6 +2992,8 @@ class DesktopAIPet:
         title = self.assistant_display_name()
         if self.bubble:
             self.bubble.show(title, msg, "warn", duration=8000)
+        # 久坐提醒属于需要引起注意的提示，触发提示音（受「关闭提示音」开关控制）
+        self._play_notification_sound()
         log.info("久坐提醒触发 | %02d:%02d | %s", now.tm_hour, now.tm_min, msg)
 
     def set_reminder_enabled(self, on):
@@ -2632,6 +3019,8 @@ class DesktopAIPet:
         title = self.assistant_display_name()
         if self.bubble:
             self.bubble.show(title, msg, "warn", duration=8000)
+        # 立即测试的久坐提醒同样触发提示音
+        self._play_notification_sound()
         log.info("久坐提醒（测试）触发 | %s", msg)
 
     # -- 久坐提醒菜单动作（由 config.json 的 health_reminder.menu 驱动）--
@@ -2744,7 +3133,7 @@ class DesktopAIPet:
         self.notify_cfg = (self.ap.get("notifications") or {}) if isinstance(self.ap, dict) else {}
         mcp_cfg = (self.notify_cfg.get("mcp") or {}) if isinstance(self.notify_cfg, dict) else {}
         self.mcp_host = mcp_cfg.get("host") or "127.0.0.1"
-        self.mcp_port = int(mcp_cfg.get("port") or 18791)
+        self.mcp_port = int(mcp_cfg.get("port") or 18975)
         self.mcp_enabled = bool(mcp_cfg.get("enabled", True))
         self.notify_token = (mcp_cfg.get("token") or "").strip()
         self.notify_enabled = bool(self.notify_cfg.get("enabled", True)) and self.mcp_enabled
@@ -2796,7 +3185,7 @@ class DesktopAIPet:
                 mcp = notif["mcp"] = {}
             mcp["enabled"] = mcp.get("enabled", True)
             mcp["host"] = mcp.get("host", "127.0.0.1")
-            mcp["port"] = mcp.get("port", 18791)
+            mcp["port"] = mcp.get("port", 18975)
             mcp["token"] = token
             notif["enabled"] = notif.get("enabled", True)
             save_config(cfg)
@@ -2832,20 +3221,52 @@ class DesktopAIPet:
 
     def _run_notify_server(self, mcp_server, host, port, token):
         try:
-            mcp_server.serve(host, port, token)
+            mcp_server.serve(
+                host, port, token, max_tries=20,
+                on_port=self._on_mcp_port_selected)
         except Exception:
-            log.exception("通知 MCP Server 异常退出（端口 %s:%d 可能被占用）", host, port)
-            self.notify("⚠️ 通知服务未启动", f"端口 {port} 可能被占用", "warn")
+            log.exception("通知 MCP Server 异常退出（端口 %s:%d 启动失败）", host, port)
+            self.notify("⚠️ 通知服务未启动",
+                        f"端口 {port} 启动失败，可能被占用或存在其他启动错误，请查看日志",
+                        "warn")
 
-    def _open_notify_settings(self):
-        """托盘「🔔 通知设置」入口。"""
-        self._singleton_window(
-            "notify:settings",
-            lambda: NotificationSettingsWindow(self))
+    def _on_mcp_port_selected(self, port):
+        """MCP Server 选定实际监听端口后（daemon 线程回调），回主线程处理。"""
+        self.post_ui(lambda: self._apply_mcp_port(port))
 
-    def _reload_notify_settings(self):
-        """通知设置窗口保存后，刷新内存态（不重启 MCP Server，仅更新开关）。"""
-        self._init_notifications()
+    def _apply_mcp_port(self, actual_port):
+        """端口与配置不符时写回 config.json，并提示用户同步来源端配置。"""
+        try:
+            cfg = load_config()
+            da = cfg.setdefault("desktop_aipet", {})
+            if not isinstance(da, dict):
+                da = cfg["desktop_aipet"] = {}
+            notif = da.setdefault("notifications", {})
+            if not isinstance(notif, dict):
+                notif = da["notifications"] = {}
+            mcp = notif.setdefault("mcp", {})
+            if not isinstance(mcp, dict):
+                mcp = notif["mcp"] = {}
+            cfg_port = int(mcp.get("port") or 18975)
+            if actual_port != cfg_port:
+                mcp["port"] = actual_port
+                save_config(cfg)
+                self.mcp_port = actual_port
+                self.notify(
+                    "🔔 通知端口已自动调整",
+                    f"默认端口 {cfg_port} 不可用，已改用 {actual_port}。\n"
+                    f"请同步 Nanobot / WorkBuddy 配置中的 MCP 端口为 {actual_port}。",
+                    "warn")
+            else:
+                log.info("通知 MCP Server 已在配置端口 %d 启动", actual_port)
+        except Exception:
+            log.exception("写回 MCP 端口失败")
+            if actual_port != self.mcp_port:
+                self.notify(
+                    "🔔 通知服务已启动（端口已调整）",
+                    f"已改用端口 {actual_port}。请同步 Nanobot / WorkBuddy 配置端口。",
+                    "warn")
+
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2897,7 +3318,7 @@ class DesktopAIPet:
                     # /releases/latest 返回 404，属正常情况而非错误。
                     self._pending_update = None
                     if notify:
-                        self.notify("✅ 已是最新",
+                        self.notify("✅ 已是最新版本",
                                     "当前 v{}（仓库暂无发布版本）".format(
                                         version_to_str(cur_v)), "ok")
                     return
@@ -2932,7 +3353,7 @@ class DesktopAIPet:
             else:
                 self._pending_update = None
                 if notify:
-                    self.notify("✅ 已是最新",
+                    self.notify("✅ 已是最新版本",
                                 "当前 v{}".format(version_to_str(cur_v)), "ok")
         except Exception as e:
             log.exception("检查更新失败")
@@ -3063,6 +3484,9 @@ class DesktopAIPet:
             self.root.withdraw()
 
         self.bubble = PetBubble(self)
+        # 启动问候：桌宠处于显示状态时，启动后延迟片刻随机挑一句问候语展示气泡
+        if self.pet_visible and self.bubble:
+            self.root.after(1000, self._startup_greeting)
         self.create_tray_icon()
         self._running = True
 

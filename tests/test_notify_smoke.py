@@ -1,14 +1,16 @@
 """notify 体系端到端冒烟测试（仅开发期使用，不参与打包）。
 
-用系统 Python（已装 mcp）运行：
-  D:\Software\Python3\python.exe test_notify_smoke.py
+用系统 Python（已装 mcp）运行（在项目根目录执行）：
+  D:\\Software\\Python3\\python.exe tests/test_notify_smoke.py
 """
+import os
 import sys
 import time
 import asyncio
 import threading
 
-sys.path.insert(0, ".")
+# 确保无论从哪个工作目录运行，都能 import 到项目根的 notify 包
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from notify.types import TaskNotification, TaskStatus, TaskEventType
 from notify.dedup import DedupTracker, DedupPolicy, Decision
@@ -25,8 +27,8 @@ class FakeApp:
         # 测试环境无 tkinter 主循环，直接同步执行
         fn()
 
-    def notify(self, title, message="", level="info"):
-        self.notify_calls.append((title, message, level))
+    def notify(self, title, message="", level="info", play_sound=False):
+        self.notify_calls.append((title, message, level, play_sound))
 
 
 # ---------------- 1) types ----------------
@@ -79,7 +81,7 @@ def test_bus():
     bus.emit(TaskNotification(source="nanobot", task_id="t1", task_name="股票检测",
                               status="success", summary="触发卖出"))
     assert app.notify_calls, "应弹窗"
-    title, msg, lvl = app.notify_calls[-1]
+    title, msg, lvl, _snd = app.notify_calls[-1]
     assert "✅" in msg and lvl == "ok", (msg, lvl)
 
     # SUPPRESS（同任务同状态重复）

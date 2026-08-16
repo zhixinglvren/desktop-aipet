@@ -100,7 +100,7 @@ class NotificationBus:
             title = "📨 任务进展汇总"
             msg = (f"近 {int(SUMMARY_WINDOW_S)} 秒内有 {count} 条来自"
                    f"「{sample.source}」的新进展（示例：{sample.task_name}）")
-            self.app.notify(title, msg, "info")
+            self.app.notify(title, msg, "info", play_sound=True)
 
     # ------------------------------------------------------------------
     # 派发到桌宠弹窗
@@ -114,4 +114,4 @@ class NotificationBus:
         if n.progress is not None:
             msg += f" ({int(n.progress * 100)}%)"
         level = STATUS_LEVEL.get(n.status, "info")
-        self.app.notify(title, msg, level)
+        self.app.notify(title, msg, level, play_sound=True)

@@ -12,7 +12,7 @@ monkeypatch 注入 hook，**不改动 Nanobot 安装目录**，升级 Nanobot �
   (b) AgentHook.after_run —— 「完成 + 摘要」确定性通知（方式二-b）
 
 使用：
-  1) 先启动桌宠（它会起 http://127.0.0.1:18791/mcp 的 MCP Server）。
+  1) 先启动桌宠（它会起 http://127.0.0.1:18975/mcp 的 MCP Server）。
   2) 把下面 URL / TOKEN 改成你 config.json 里
      desktop_aipet.notifications.mcp 的实际值（TOKEN 即桌宠首次启动随机生成
      并回填到它自己 config.json 的那串；复制到这里）。
@@ -27,7 +27,7 @@ monkeypatch 注入 hook，**不改动 Nanobot 安装目录**，升级 Nanobot �
 import asyncio
 
 # ---- 连接配置：改成你桌宠 config.json 里的实际值 ----
-DESKTOP_PET_MCP_URL = "http://127.0.0.1:18791/mcp"
+DESKTOP_PET_MCP_URL = "http://127.0.0.1:18975/mcp"
 DESKTOP_PET_TOKEN = "<在此粘贴桌宠 config.json 的 notifications.mcp.token>"
 
 
